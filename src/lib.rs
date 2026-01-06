@@ -3,7 +3,7 @@ use std::u16;
 use rand::{rng, seq::IteratorRandom};
 
 mod guessers;
-pub use guessers::RandomGuesser;
+pub use guessers::{RandomGuesser, MaxEntropyGuesser};
 
 /// Wordlist containing all possible guesses and solutions.
 const WORDS: &str = include_str!("../words.txt");
@@ -19,9 +19,9 @@ impl Wordle {
         Self { words }
     }
 
-    pub fn play<G: Guess>(&self, solution: &'static str, guesser: G) -> Option<u16> {
+    pub fn play(&self, solution: &'static str, mut guesser: MaxEntropyGuesser) -> Option<u16> {
         let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
-        for i in 1..=16 {
+        for i in 1..=6 {
             let guess = guesser.guess(&self.words, &prior_guesses);
             if guess == solution {
                 return Some(i);
@@ -38,7 +38,7 @@ impl Wordle {
 
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Feedback {
     Correct, // Green
     Misplaced, // Yellow
@@ -85,7 +85,7 @@ pub trait Guess {
     ///
     /// (Note: the prior guesses are used to compute the list of possible solutions inside of
     /// `guess()`.)
-    fn guess(&self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> String;
+    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> String;
 }
 
 
