@@ -1,5 +1,5 @@
 use crate::{Guess, GuessResult, compute_feedback, WORDS, Feedback};
-use std::{collections::{HashMap, HashSet}, f64};
+use std::{cmp::Ordering, collections::{HashMap, HashSet}, f64, thread};
 use rand::{rng, seq::IteratorRandom};
 
 pub struct RandomGuesser {}
@@ -12,7 +12,7 @@ impl Guess for RandomGuesser {
 
 
 pub struct MaxEntropyGuesser {
-    pub possible_solutions: HashSet<&'static str>,
+    possible_solutions: HashSet<&'static str>,
 }
 
 impl MaxEntropyGuesser {
@@ -57,42 +57,21 @@ impl Guess for MaxEntropyGuesser {
         let total_entropy = (self.possible_solutions.len() as f64).log2();
         println!("Possible solutions: {}, entropy: {}", self.possible_solutions.len(), total_entropy);
 
+        // if one possible solution is left, return it as the final guess
         if self.possible_solutions.len() == 1 {
             let result = self.possible_solutions.iter().last().unwrap().to_string();
             println!("Guessing: {result}");
             return result;
         }
 
-
         // HARDCODED FIRST GUESS
         if prior_guesses.len() == 0 {
-            println!("Guessing: crate (fixed first guess)");
-            return String::from("crate");
+            // tares (entropy: 6.159376455792673)
+            // Best first/1-round information gain
+            // TODO: replace with best 2/3-round information gain word?
+            println!("Guessing: tares (entropy: 6.159376455792673)");
+            return String::from("tares");
         }
-
-        // compute entropy (expected information gain) for all possible guesses
-        //  to compute it, go through all possible solution words, compute the resulting patterns,
-        //  compute the probability of each pattern, and the subsequent expected information gain
-        //  Info(event) = -log2(Prob(event))
-        //  an event here would be observing a specific pattern 
-        //  to compute the proba of observing a specific pattern, simply count for how many
-        //  solution words this pattern would occur
-        //  this is how we get 
-        //  E[I] = H(p) = -Sum_x[p(x) * log2(p(x))]
-        //  NOTE: p(x) here is not the proba of a word being the solution, it's the proba of a
-        //  specific pattern occuring
-
-
-        // for each word in wordlist:
-        //   
-        //   for each possible solution:
-        //     
-        //     compute result pattern 
-        //     increase count in HashSet
-        //     increase counter
-        // 
-        //   compute probas and entropy for word (guess) based on pattern counts
-        // choose best guess based on max entropy
 
         let mut best_guess = "";
         let mut best_score = f64::MIN;
@@ -122,6 +101,112 @@ impl Guess for MaxEntropyGuesser {
             }
         } 
         println!("Guessing: {best_guess}\n(Entropy: {best_score})");
+        best_guess.to_string()
+    }
+}
+
+
+pub struct ParallelMaxEntropyGuesser {
+    possible_solutions: HashSet<&'static str>,
+    n_threads: usize,
+}
+
+impl ParallelMaxEntropyGuesser {
+    pub fn new() -> Self {
+        let possible_solutions: HashSet<&str> = WORDS.split_whitespace().collect();
+        let n_threads = usize::max(1, thread::available_parallelism().unwrap().get() - 2);
+        println!("Using ParallelMaxEntropyGuesser with {n_threads} threads");
+        Self { possible_solutions, n_threads }
+    }
+
+    fn update_possible_solutions(&mut self, result: &GuessResult) {
+        self.possible_solutions = self.possible_solutions.iter().filter_map(|word| {
+            // if word would give the same result mask as the guess, keep it, otherwise drop it
+            if compute_feedback(word, &result.guess) == result.feedback {
+                Some(*word)
+            } else {
+                None
+            }
+        }).collect();
+    }
+}
+
+// NOTE: same algorithm as normal MaxEntropyGuesser, but parallelization allows us to actually
+// compute the best first guess and its entropy
+impl Guess for ParallelMaxEntropyGuesser {
+    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> String {
+
+        // update possible solution based on the previous guess
+        if let Some(guess) = prior_guesses.last() {
+            let prev_entropy = (self.possible_solutions.len() as f64).log2();
+            self.update_possible_solutions(&guess);
+            let last_guess_info = prev_entropy - (self.possible_solutions.len() as f64).log2();
+
+            println!("Result pattern: {:?}", guess.feedback);
+            println!("Actual information gain: {last_guess_info}\n");
+        }
+
+        println!("Guess #{}", prior_guesses.len()+1);
+
+        let total_entropy = (self.possible_solutions.len() as f64).log2();
+        println!("Possible solutions: {}, entropy: {}", self.possible_solutions.len(), total_entropy);
+
+        // if one possible solution is left, return it as a guess 
+        // required as we havent introduced solution probability weighting yet
+        if self.possible_solutions.len() == 1 {
+            let result = self.possible_solutions.iter().last().unwrap().to_string();
+            println!("Guessing: {result}");
+            return result;
+        }
+
+        // TODO: can precompute these wordlist chunks
+        let refs: Vec<&str> = wordlist.iter().copied().collect();
+        let chunk_size = wordlist.len().div_ceil(self.n_threads);
+
+        let solutions = &self.possible_solutions;
+
+        let (best_score, best_guess) = thread::scope(|s| {
+            let mut handles = Vec::new();
+
+            for chunk in refs.chunks(chunk_size) {
+                handles.push(s.spawn(move || {
+                    let mut best_guess = "";
+                    let mut best_score = f64::NEG_INFINITY;
+                    for &guess in chunk {
+                    
+                        let mut pattern_counts: HashMap<[Feedback; 5], f64> = HashMap::new();
+                        let mut n: f64 = 0.0;
+
+                        for solution in solutions {
+                            *pattern_counts
+                                .entry(compute_feedback(solution, guess))
+                                .or_insert(0.0) += 1.0; 
+                            n += 1.0;
+                        } 
+                        let entropy = -pattern_counts.iter().map(|(_, count)| {
+                            let p = *count/n;
+                            p * p.log2()
+                        }).sum::<f64>();
+
+                        if entropy > best_score {
+                            best_score = entropy;
+                            best_guess = guess;
+                        }
+                    }
+                    (best_score, best_guess)
+                    
+                }));
+            }
+
+            handles.into_iter()
+                .map(|handle| handle.join().unwrap())
+                .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
+                .unwrap()
+
+
+        });
+
+        println!("Guessing: {best_guess} (entropy: {best_score})");
         best_guess.to_string()
     }
 }
