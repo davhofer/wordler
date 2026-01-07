@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::u16;
 use rand::{rng, seq::IteratorRandom};
 
 mod guessers;
-pub use guessers::{RandomGuesser, MaxEntropyGuesser, ParallelMaxEntropyGuesser};
+pub use guessers::MaxEntropyGuesser;
 
 /// Wordlist containing all possible guesses and solutions.
 const WORDS: &str = include_str!("../words.txt");
@@ -19,15 +19,15 @@ impl Wordle {
         Self { words }
     }
 
-    pub fn play<G: Guess>(&self, solution: &'static str, mut guesser: G) -> Option<u16> {
+    pub fn play<G: Guesser>(&self, solution: &'static str, mut guesser: G) -> Option<u16> {
         let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
         for i in 1..=6 {
             let guess = guesser.guess(&self.words, &prior_guesses);
-            if guess == solution {
+            if guess.guess == solution {
                 return Some(i);
             }
-            let feedback = compute_feedback(solution, &guess);
-            prior_guesses.push(GuessResult { guess, feedback });
+            let feedback = compute_feedback(solution, &guess.guess);
+            prior_guesses.push(GuessResult { guess: guess.guess, feedback });
         }
         None 
     }
@@ -74,20 +74,45 @@ pub fn compute_feedback(solution: &str, guess: &str) -> [Feedback; 5] {
     mask
 }
 
+// TODO: make guess a trait and implement different ways of computing guess quality? or do this in
+// a different place?
+#[derive(Debug)]
+pub struct Guess {
+    guess: String,
+    entropy: f64,
+    solution_probability: f64,
+}
+
+impl PartialEq for Guess {
+    fn eq(&self, other: &Self) -> bool {
+        self.guess == other.guess
+    }
+    fn ne(&self, other: &Self) -> bool {
+        self.guess != other.guess
+    }
+}
+
+
+impl Guess {
+    pub fn quality(&self) -> f64 {
+        // TODO: other ways of computing guess quality?
+        self.entropy + self.solution_probability
+    }
+}
+
 pub struct GuessResult {
     guess: String,
     feedback: [Feedback; 5],
 }
 
-pub trait Guess {
+pub trait Guesser {
     
     /// Produce a new guess given the wordlist and prior guesses.
     ///
     /// (Note: the prior guesses are used to compute the list of possible solutions inside of
     /// `guess()`.)
-    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> String;
+    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> Guess;
 }
-
 
 
 // ADAPTED FROM https://github.com/jonhoo/roget/blob/main/src/lib.rs
