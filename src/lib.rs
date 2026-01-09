@@ -1,5 +1,5 @@
 use hashbrown::HashSet;
-use std::u16;
+use std::{collections::HashMap, u8, io::{self, Write, stdin, stdout}};
 use rand::{rng, seq::IteratorRandom};
 
 mod guessers;
@@ -19,7 +19,7 @@ impl Wordle {
         Self { words }
     }
 
-    pub fn play<G: Guesser>(&self, solution: &'static str, mut guesser: G) -> Option<u16> {
+    pub fn play<G: Guesser>(&self, solution: &'static str, mut guesser: G) -> Option<u32> {
         let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
         for i in 1..=6 {
             let guess = guesser.guess(&self.words, &prior_guesses);
@@ -32,10 +32,117 @@ impl Wordle {
         None 
     }
 
+    pub fn interactive_solve<G: Guesser>(&self, mut guesser: G) {
+        println!("Let's solve a wordle puzzle together.");
+        println!("I will propose the words to guess, and you respond with the resulting color pattern. Please write the pattern as 5 single characters separated by spaces. Use C (correct) for green, M (misplaced) for yellow, and W (wrong) for grey.\nFor example, the pattern [Green, Grey, Yellow, Grey, Grey] should be denoted as 'C W M W W'.");
+
+        let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
+        for i in 1..=6 {
+            let guess = guesser.guess(&self.words, &prior_guesses);
+            println!("Guess #{i}: {}", guess.guess);
+
+            let pattern = get_userinput();
+            let feedback_vec: Vec<_> = pattern.trim().split_whitespace().map(|c| {
+                match c {
+                    "C" => Feedback::Correct,
+                    "M" => Feedback::Misplaced,
+                    "W" => Feedback::Wrong,
+                    _ => panic!("only enter 'C', 'M', or 'W'"),
+                }
+            }).collect();
+
+            if feedback_vec.len() != 5 {
+                panic!("you need to enter exactly 5 characters");
+            }
+            let mut feedback = [Feedback::Wrong; 5];
+            for i in 0..5 {
+                feedback[i] = feedback_vec[i];
+            }
+            prior_guesses.push(GuessResult { guess: guess.guess, feedback });
+        }
+    }
+
     pub fn random_word(&self) -> Option<&'static str> {
         self.words.iter().choose(&mut rng()).map(|word| *word)
     }
 
+    pub fn wordlist(&self) -> &HashSet<&'static str> {
+        &self.words
+    }
+
+    pub fn benchmark<F, G>(&self, make_guesser: F, max_games: Option<usize>) 
+    where 
+        F: Fn() -> G,
+        G: Guesser,
+    {
+
+        // TODO: compute average information gain after n rounds (to check if it matches with
+        // expectation for initial guess)
+
+        let max_games = usize::min(max_games.unwrap_or(self.words.len()), self.words.len());
+        let total_games = max_games as f64;
+
+        let mut guesses_hist: HashMap<u32, u32> = HashMap::new();
+
+        let mut failed = Vec::new();
+
+        let mut total_guesses = 0;
+        for (i, &solution) in self.words.iter().enumerate() {
+            if i >= max_games {
+                break;
+            }
+
+            let guesser = make_guesser();
+            let guesses = self.play(solution, guesser).unwrap_or(0);
+
+            if guesses == 0 {
+                failed.push(solution);
+            } else {
+                *guesses_hist.entry(guesses).or_insert(0) += 1;
+                total_guesses += guesses;
+            }
+
+            if i % 10 == 0 {
+                print!("\rProgress: {:.2}%", ((i as f64)/total_games) * 100.0);
+                io::stdout().flush().unwrap();
+            }
+        }
+
+        let failed_games = failed.len();
+
+
+        println!("\rProgress: 100%     ");
+        io::stdout().flush().unwrap();
+        println!("Benchmark complete!");
+        println!("Games: {}, Avg guesses: {}, Failures: {} ({}%)", total_games, (total_guesses as f64)/total_games, failed_games, ((failed_games as f64)/total_games) * 100.0);
+
+
+        println!("Num guesses histogram:");
+        for i in 1..=6 {
+            println!("{} guesses: {}", i, *guesses_hist.get(&i).unwrap_or(&0)) ;
+        }
+        println!("7+ guesses (fail): {}", failed_games);
+
+        println!("\nFailed words:");
+        for w in failed {
+            println!("{w}");
+        }
+    }
+
+}
+
+fn get_userinput() -> String {
+    let mut s = String::new();
+    print!("Please enter the pattern using C, M, and W: ");
+    let _ = stdout().flush();
+    stdin().read_line(&mut s).expect("Did not enter a correct string");
+    if let Some('\n')=s.chars().next_back() {
+        s.pop();
+    }
+    if let Some('\r')=s.chars().next_back() {
+        s.pop();
+    }
+    s
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -81,15 +188,6 @@ pub struct Guess {
     guess: String,
     entropy: f64,
     solution_probability: f64,
-}
-
-impl PartialEq for Guess {
-    fn eq(&self, other: &Self) -> bool {
-        self.guess == other.guess
-    }
-    fn ne(&self, other: &Self) -> bool {
-        self.guess != other.guess
-    }
 }
 
 
