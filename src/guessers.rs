@@ -1,5 +1,5 @@
-use crate::{compute_feedback, Feedback, Guess, GuessResult, Guesser, WORDS};
-use std::{f64, time::{Duration, Instant}};
+use crate::{compute_feedback, Feedback, Guess, GuessResult, GuessType, Guesser, WORDS};
+use std::{f64, time::Instant};
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 
@@ -7,6 +7,10 @@ use rayon::prelude::*;
 // probability of a word being the correct solution. while it is uniform, it grows with fewer total
 // possible solution words
 // Question: how do we do the weighting?
+
+
+// TODO: introduce a very slight bias towards more common words, after all.
+// for example: manic over amnic
 
 fn pattern_partitions(guess: &'static str, possible_solutions: &HashSet<&'static str>) -> HashMap<[Feedback; 5], HashSet<&'static str>> {
     let mut pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = HashMap::new();
@@ -22,14 +26,23 @@ fn pattern_partitions(guess: &'static str, possible_solutions: &HashSet<&'static
 
 pub struct MaxEntropyGuesser {
     possible_solutions: HashSet<&'static str>,
+    wordlist: HashSet<&'static str>,
     initial_guess: Option<&'static str>,
     verbose: bool,
+    guesses_made: u32,
 }
+
+// TODO: don't just compute the best initial guess, compute top n
 
 impl MaxEntropyGuesser {
     pub fn new() -> Self {
-        let possible_solutions: HashSet<&str> = WORDS.split_whitespace().collect();
-        Self { possible_solutions, initial_guess: None, verbose: false, }
+        let wordlist: HashSet<&'static str> = WORDS.split_whitespace().collect();
+        let possible_solutions: HashSet<&'static str> = WORDS.split_whitespace().collect();
+        Self { wordlist, possible_solutions, initial_guess: None, verbose: false, guesses_made: 0 }
+    }
+
+    pub fn set_verbose(&mut self) {
+        self.verbose = true;
     }
 
     pub fn set_initial_guess(&mut self, guess: &'static str) {
@@ -47,19 +60,17 @@ impl MaxEntropyGuesser {
         }).collect();
     }
 
-    pub fn compute_best_guess(&self, wordlist: &HashSet<&str>) -> Guess {
+    pub fn compute_best_guess(&self, possible_solutions: &HashSet<&'static str>) -> Guess {
 
         // parallelize the entropy calculation for all guesses
-        wordlist.par_iter().map(|guess_str| {
+        self.wordlist().par_iter().map(|guess_str| {
  
-            // println!("Checking guess '{guess}'");
-
             let mut pattern_counts: HashMap<[Feedback; 5], f64> = HashMap::new();
             
-            let num_solutions = self.possible_solutions.len() as f64;
+            let num_solutions = possible_solutions.len() as f64;
             let uniform_solution_proba = 1.0/num_solutions;
 
-            for solution in &self.possible_solutions {
+            for solution in possible_solutions {
                 *pattern_counts
                     .entry(compute_feedback(solution, guess_str))
                     .or_insert(0.0) += 1.0; 
@@ -71,35 +82,33 @@ impl MaxEntropyGuesser {
 
             // println!("Entropy: {entropy}");
             Guess {
-                guess: guess_str.to_string(),
-                entropy,
-                solution_probability: if self.possible_solutions.contains(guess_str) { uniform_solution_proba } else { 0.0 }
+                guess: guess_str,
+                variant: GuessType::Entropy { 
+                    entropy, 
+                    solution_probability: if possible_solutions.contains(guess_str) { 
+                        uniform_solution_proba 
+                    } else { 
+                        0.0 
+                    } 
+                }
             }
         }).min_by(|a, b| b.quality().total_cmp(&a.quality())).unwrap()
     }
 
-    pub fn compute_best_initial_guess(&self, wordlist: &HashSet<&'static str>) -> (f64, Guess) {
+    pub fn compute_best_initial_guess(&self) -> (f64, Guess) {
+        let possible_solutions = self.wordlist();
         // computes the guess with the largest expected information gain after 2 rounds
         
         // NOTE: we only use max entropy here 
 
         // go over all guesses to compute their level 1 entropy and subsequent expected l2 entropy
-        wordlist.par_iter().map(|guess_str| {
+        self.wordlist().par_iter().map(|guess_str| {
  
-            let mut pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = pattern_partitions(guess_str, &self.possible_solutions);
-            
-            let num_solutions = self.possible_solutions.len() as f64;
+            let num_solutions = possible_solutions.len() as f64;
             let uniform_solution_proba = 1.0/num_solutions;
 
-            // for each potential solution, compute corresponding feedback pattern
-            for solution in &self.possible_solutions {
-                pattern_buckets
-                    .entry(compute_feedback(solution, guess_str))
-                    .or_insert(HashSet::new()).insert(solution); 
-            } 
-
+            let pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = pattern_partitions(guess_str, possible_solutions);
             
-
             // level 2 entropy analysis
 
             // TODO: does par_iter make sense here? or obsolete as compute_best_guess also will do
@@ -115,7 +124,7 @@ impl MaxEntropyGuesser {
                 
                 // expected level 2 entropy := "weighted sum of all L2 entropies" = Sum_(pattern) {
                 // p(pattern) * best_l2_guess(pattern).entropy }
-                let expected_l2_entropy = bucket_proba * best_l2_guess.entropy;
+                let expected_l2_entropy = bucket_proba * best_l2_guess.unwrap_entropy().0;
                 // level 1 entropy = - Sum_(pattern) { p(pattern) * log2( p(pattern) ) }
                 let l1_entropy = bucket_proba * bucket_proba.log2();
                 (l1_entropy, expected_l2_entropy)
@@ -129,63 +138,78 @@ impl MaxEntropyGuesser {
 
             let score = l1_entropy + expected_l2_entropy;
 
-            println!("ok");
             // return combined entropy score & Guess
             (score, Guess {
-                guess: guess_str.to_string(),
-                entropy: l1_entropy,
-                solution_probability: if self.possible_solutions.contains(guess_str) { 
-                    uniform_solution_proba 
-                } else { 
-                    0.0 
+                guess: guess_str,
+                variant: GuessType::Entropy { 
+                    entropy: l1_entropy, 
+                    solution_probability: if possible_solutions.contains(guess_str) { 
+                        uniform_solution_proba 
+                    } else { 
+                        0.0 
+                    }
                 }
             })
-        }).min_by(|a, b| b.0.total_cmp(&a.0)).unwrap()
+        }).max_by(|a, b| a.0.total_cmp(&b.0)).unwrap()
     }
 }
 
 impl Guesser for MaxEntropyGuesser {
-    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> Guess {
 
+    fn guesses_made(&self) -> u32 {
+        self.guesses_made
+    }
 
-        // update possible solution based on the previous guess
-        if let Some(guess) = prior_guesses.last() {
-            let prev_entropy = (self.possible_solutions.len() as f64).log2();
-            self.update_possible_solutions(&guess);
-            let last_guess_info = prev_entropy - (self.possible_solutions.len() as f64).log2();
+    fn wordlist(&self) -> &HashSet<&'static str> {
+        &self.wordlist
+    }
 
-            if self.verbose {
-                println!("Result pattern: {:?}", guess.feedback);
-                println!("Actual information gain: {last_guess_info}\n");
-            }
-        }
+    fn possible_solutions(&self) -> &HashSet<&'static str> {
+        &self.possible_solutions
+    }
 
+    fn update_state(&mut self, guess_result: GuessResult) {
+        self.guesses_made += 1;
 
-        let total_entropy = (self.possible_solutions.len() as f64).log2();
+        let prev_entropy = (self.possible_solutions().len() as f64).log2();
+        self.update_possible_solutions(&guess_result);
+
+        let last_guess_info = prev_entropy - (self.possible_solutions.len() as f64).log2();
 
         if self.verbose {
-            println!("Guess #{}", prior_guesses.len()+1);
-            println!("Possible solutions: {}, entropy: {}", self.possible_solutions.len(), total_entropy);
+            println!("Result pattern: {:?}", guess_result.feedback);
+            println!("Actual information gain: {last_guess_info}\n");
+        }
+        
+    }
+    
+    fn guess(&self) -> Guess {
+        let total_entropy = (self.possible_solutions().len() as f64).log2();
+
+        if self.verbose {
+            println!("Guess #{}", self.guesses_made()+1);
+            println!("Possible solutions: {}, entropy: {}", self.possible_solutions().len(), total_entropy);
         }
 
-        if prior_guesses.len() == 0 && let Some(guess_str) = self.initial_guess {
+        if self.guesses_made() == 0 && let Some(guess_str) = self.initial_guess {
             // tares (entropy: 6.159376455792673)
             // Best first/1-round information gain
             // TODO: replace with best 2/3-round information gain word?
             if self.verbose {
                 println!("Using initial guess: {guess_str}");
             }
-            return Guess{ 
-                guess: String::from(guess_str), 
-                entropy: 0.0, 
-                solution_probability: 0.0,
+            return Guess { 
+                guess: guess_str, 
+                variant: GuessType::Entropy { entropy: 0.0, solution_probability: 0.0 }
             };
         }
 
-        let best_guess = self.compute_best_guess(wordlist);
+        let start = Instant::now();
+        let best_guess = self.compute_best_guess(self.possible_solutions());
+        let duration = (Instant::now() - start).as_secs_f32();
 
         if self.verbose {
-            println!("Guessing: {best_guess:?}");
+            println!("Guessing: {best_guess:?}\ntook {duration:.2}s");
         }
         best_guess
     }
@@ -193,26 +217,53 @@ impl Guesser for MaxEntropyGuesser {
 
 pub struct MinExpectedScoreGuesser {
     wordlist: HashSet<&'static str>,
+    possible_solutions: HashSet<&'static str>,
     initial_guess: Option<&'static str>,
     verbose: bool,
+    guesses_made: u32,
 }
 
 impl MinExpectedScoreGuesser {
     pub fn new() -> Self {
         let wordlist: HashSet<&str> = WORDS.split_whitespace().collect();
-        Self { wordlist, initial_guess: None, verbose: false, }
+        let possible_solutions: HashSet<&str> = WORDS.split_whitespace().collect();
+        Self { wordlist, possible_solutions, initial_guess: None, verbose: false, guesses_made: 0 }
+    }
+
+    pub fn set_verbose(&mut self) {
+        self.verbose = true;
+    }
+
+    pub fn set_initial_guess(&mut self, guess: &'static str) {
+        self.initial_guess = Some(guess);
+    }
+
+    fn update_possible_solutions(&mut self, result: &GuessResult) {
+        self.possible_solutions = self.possible_solutions.iter().filter_map(|word| {
+            // if word would give the same result mask as the guess, keep it, otherwise drop it
+            if compute_feedback(word, &result.guess) == result.feedback {
+                Some(*word)
+            } else {
+                None
+            }
+        }).collect();
+    }
+
+    // TODO: memoize expected score
+    pub fn compute_best_guess(&self, possible_solutions: &HashSet<&'static str>) -> Guess {
+        self.wordlist().par_iter().map(|possible_guess| { 
+            let guess_variant = GuessType::ExpectedScore { score: self.expected_score(possible_guess, possible_solutions) };
+            Guess { guess: possible_guess, variant: guess_variant }
+        }).min_by(|a, b| b.unwrap_expected_score().total_cmp(&a.unwrap_expected_score())).unwrap()
     }
 
     // TODO: recursion, does this work? memory consumption? make more efficient?
     // bottom up instead of top down?
     pub fn expected_score(&self, guess: &'static str, possible_solutions: &HashSet<&'static str>) -> f64 {
-        let p_guess = if possible_solutions.contains(guess) {
-            1.0/(possible_solutions.len() as f64) 
-        } else {
-            0.0
-        };
+        println!("computing E[score] of guess '{guess}' with len possible solutions {}", possible_solutions.len());
 
         // compute pattern buckets with corresponding possible solutions
+        // O(len(possible_solutions))
         let buckets = pattern_partitions(guess, possible_solutions);
 
         // compute score and size for each bucket
@@ -220,21 +271,15 @@ impl MinExpectedScoreGuesser {
         let bucket_score_size = buckets.par_iter()
             .map(|(_, solution_set)| {
                 (
-                    self.wordlist.par_iter().map(|possible_guess| { 
-                        self.expected_score(possible_guess, solution_set)
-                    }).min_by(|a, b| b.total_cmp(&a)).unwrap(), 
+                    self.compute_best_guess(solution_set).unwrap_expected_score(), 
                     solution_set.len()
                 )
             });
 
         // compute weighted avg of scores of all buckets
-        let weighted_avg_score: f64 = bucket_score_size
+        bucket_score_size
             .map(|(score, size)| score * (size as f64)/(possible_solutions.len() as f64))
-            .sum();
-
-        // expected score is 1 if solution is guess, and weighted_avg_score otherwise
-        p_guess * 1.0 + (1.0 - p_guess) * weighted_avg_score 
-        // TODO: lazily compute weighted_avg_score?
+            .sum()
     }
 
 }
@@ -281,12 +326,49 @@ impl MinExpectedScoreGuesser {
 
 // TODO: do we need to change the Guess struct? entropy does not make sense for other types of
 // guessers, so maybe change abstraction?
+//
+//
+//
+//
+// TODO: IS THIS APPROACH BASICALLY JUST "play all games and count"?
+// or is it faster?
+
 impl Guesser for MinExpectedScoreGuesser {
-    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> Guess {
 
+    fn possible_solutions(&self) -> &HashSet<&'static str> {
+        &self.possible_solutions
+    }
 
+    fn wordlist(&self) -> &HashSet<&'static str> {
+        &self.wordlist
+    }
 
-        Guess { guess: String::new(), entropy: 0.0, solution_probability: 0.0 }    
+    fn guesses_made(&self) -> u32 {
+        self.guesses_made
+    }
+
+    fn update_state(&mut self, guess_result: GuessResult) {
+        self.guesses_made += 1;
+
+        self.update_possible_solutions(&guess_result);
+
+        if self.verbose {
+            println!("Result pattern: {:?}", guess_result.feedback);
+        }
+        
+    }
+
+    fn guess(&self) -> Guess {
+        if self.guesses_made() == 0 && let Some(guess_str) = self.initial_guess {
+            if self.verbose {
+                println!("Using initial guess: {guess_str}");
+            }
+            return Guess { 
+                guess: guess_str, 
+                variant: GuessType::ExpectedScore { score: 0.0 } 
+            };
+        }
+        self.compute_best_guess(self.possible_solutions())
     }
 }
 
