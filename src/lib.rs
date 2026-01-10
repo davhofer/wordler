@@ -1,12 +1,20 @@
 use hashbrown::HashSet;
-use std::{collections::HashMap, u8, io::{self, Write, stdin, stdout}};
+use std::{collections::HashMap, io::{self, Write, stdin, stdout}};
 use rand::{rng, seq::IteratorRandom};
 
 mod guessers;
-pub use guessers::MaxEntropyGuesser;
+pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
 
 /// Wordlist containing all possible guesses and solutions.
 const WORDS: &str = include_str!("../words.txt");
+
+pub fn find_word_in_wordlist(word: String, wordlist: &HashSet<&'static str>) -> Option<&'static str> {
+    wordlist
+        .iter()
+        .filter(|&&candidate| candidate == word)
+        .next()
+        .map(|item| *item)
+}
 
 #[derive(Debug)]
 pub struct Wordle {
@@ -20,14 +28,13 @@ impl Wordle {
     }
 
     pub fn play<G: Guesser>(&self, solution: &'static str, mut guesser: G) -> Option<u32> {
-        let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
-        for i in 1..=6 {
-            let guess = guesser.guess(&self.words, &prior_guesses);
-            if guess.guess == solution {
+        for i in 1..=10 {
+            let guess = guesser.guess().get_string();
+            if guess == solution {
                 return Some(i);
             }
-            let feedback = compute_feedback(solution, &guess.guess);
-            prior_guesses.push(GuessResult { guess: guess.guess, feedback });
+            let feedback = compute_feedback(solution, guess);
+            guesser.update_state(GuessResult{ guess, feedback });
         }
         None 
     }
@@ -36,10 +43,9 @@ impl Wordle {
         println!("Let's solve a wordle puzzle together.");
         println!("I will propose the words to guess, and you respond with the resulting color pattern. Please write the pattern as 5 single characters separated by spaces. Use C (correct) for green, M (misplaced) for yellow, and W (wrong) for grey.\nFor example, the pattern [Green, Grey, Yellow, Grey, Grey] should be denoted as 'C W M W W'.");
 
-        let mut prior_guesses: Vec<GuessResult> = Vec::new(); 
         for i in 1..=6 {
-            let guess = guesser.guess(&self.words, &prior_guesses);
-            println!("Guess #{i}: {}", guess.guess);
+            let guess = guesser.guess().get_string();
+            println!("Guess #{i}: {}", guess);
 
             let pattern = get_userinput();
             let feedback_vec: Vec<_> = pattern.trim().split_whitespace().map(|c| {
@@ -58,7 +64,7 @@ impl Wordle {
             for i in 0..5 {
                 feedback[i] = feedback_vec[i];
             }
-            prior_guesses.push(GuessResult { guess: guess.guess, feedback });
+            guesser.update_state(GuessResult { guess, feedback });
         }
     }
 
@@ -118,10 +124,10 @@ impl Wordle {
 
 
         println!("Num guesses histogram:");
-        for i in 1..=6 {
+        for i in 1..=10 {
             println!("{} guesses: {}", i, *guesses_hist.get(&i).unwrap_or(&0)) ;
         }
-        println!("7+ guesses (fail): {}", failed_games);
+        println!("11+ guesses (fail): {}", failed_games);
 
         println!("\nFailed words:");
         for w in failed {
@@ -181,25 +187,50 @@ pub fn compute_feedback(solution: &str, guess: &str) -> [Feedback; 5] {
     mask
 }
 
-// TODO: make guess a trait and implement different ways of computing guess quality? or do this in
-// a different place?
 #[derive(Debug)]
-pub struct Guess {
-    guess: String,
-    entropy: f64,
-    solution_probability: f64,
+enum GuessType {
+    Entropy { entropy: f64, solution_probability: f64 },
+    ExpectedScore { score: f64 },
 }
 
+#[derive(Debug)]
+pub struct Guess {
+    guess: &'static str,
+    variant: GuessType,
+}
 
 impl Guess {
+
+    // TODO: different ways of computing guess quality? 
     pub fn quality(&self) -> f64 {
-        // TODO: other ways of computing guess quality?
-        self.entropy + self.solution_probability
+        match self.variant {
+            GuessType::Entropy { entropy, solution_probability } => entropy + solution_probability,
+            GuessType::ExpectedScore { score } => score, // TODO: bad interface, for this variant
+            // lower quality is better...
+        }
+    }
+
+    pub fn get_string(&self) -> &'static str {
+        self.guess
+    }
+
+    pub fn unwrap_entropy(&self) -> (f64, f64) {
+        match self.variant {
+            GuessType::Entropy { entropy, solution_probability } => (entropy, solution_probability),
+            _ => panic!("Called unwrap_entropy on a non-Entropy guess!"),
+        }
+    }
+
+    pub fn unwrap_expected_score(&self) -> f64 {
+        match self.variant {
+            GuessType::ExpectedScore { score } => score,
+            _ => panic!("Called unwrap_expected_score on a non-ExpectedScore guess!"),
+        }
     }
 }
 
 pub struct GuessResult {
-    guess: String,
+    guess: &'static str,
     feedback: [Feedback; 5],
 }
 
@@ -209,7 +240,18 @@ pub trait Guesser {
     ///
     /// (Note: the prior guesses are used to compute the list of possible solutions inside of
     /// `guess()`.)
-    fn guess(&mut self, wordlist: &HashSet<&str>, prior_guesses: &Vec<GuessResult>) -> Guess;
+
+    fn guess(&self) -> Guess;
+
+    fn guesses_made(&self) -> u32;
+
+    fn update_state(&mut self, guess_result: GuessResult);
+
+    // set of allowed guesses
+    fn wordlist(&self) -> &HashSet<&'static str>;
+
+    // set of currently possible solutions
+    fn possible_solutions(&self) -> &HashSet<&'static str>;
 }
 
 
