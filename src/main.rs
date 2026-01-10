@@ -1,14 +1,13 @@
-use wordler::{find_word_in_wordlist, MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle};
-use std::{time::Instant};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::time::Instant;
+use wordler::{MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle, find_word_in_wordlist};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-
     /// Command to execute
     #[command(subcommand)]
-    command: Cmd, 
+    command: Cmd,
 }
 
 // _ => println!("Please provide one of the following commands: 'play-random', 'benchmark', 'solve', or 'precompute-guesses'"),
@@ -20,7 +19,6 @@ enum Cmd {
     /// Interactively use the bot to solve a wordle game
     #[command()]
     Solve {
-
         /// Wordle guesser strategy
         #[arg(short, long, required = true)]
         guesser: GuesserTypeEnum,
@@ -28,13 +26,11 @@ enum Cmd {
         /// Initial guess
         #[arg(short, long)]
         initial_guess: Option<String>,
-
     },
 
     /// Benchmark the guesser strategies of the wordle bot
     #[command()]
     Benchmark {
-
         /// Wordle guesser strategy to benchmark. If not provided, all guessers will be
         /// benchmarked.
         #[arg(short, long)]
@@ -52,14 +48,11 @@ enum Cmd {
 
     /// Precompute the best initial guesses
     #[command()]
-    Precompute {
-
-    },
+    Precompute {},
 
     /// Let the bot play a game
     #[command()]
     Play {
-
         /// Wordle guesser strategy
         #[arg(short, long, required = true)]
         guesser: GuesserTypeEnum,
@@ -78,7 +71,7 @@ enum Cmd {
 #[value()]
 enum GuesserTypeEnum {
     MaxEntropyGuesser,
-    MinExpectedScoreGuesser
+    MinExpectedScoreGuesser,
 }
 
 // fn make_guesser(guesser_type: GuesserTypeEnum) -> Box<dyn Guesser> {
@@ -88,12 +81,17 @@ enum GuesserTypeEnum {
 //     }
 // }
 
-fn play(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>, solution_arg: Option<String>) {
+fn play(
+    guesser_arg: GuesserTypeEnum,
+    initial_guess_arg: Option<String>,
+    solution_arg: Option<String>,
+) {
     let wordle = Wordle::new();
 
     let solution = if let Some(solution_str) = solution_arg {
-        find_word_in_wordlist(solution_str, wordle.wordlist())
-            .expect("'{solution_str}' is not in the wordlist, choose a different word as the solution")
+        find_word_in_wordlist(solution_str, wordle.wordlist()).expect(
+            "'{solution_str}' is not in the wordlist, choose a different word as the solution",
+        )
     } else {
         let sol = wordle.random_word().expect("unable to choose random word");
         println!("Choosing random word as the solution: '{sol}'.");
@@ -102,8 +100,9 @@ fn play(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>, solutio
 
     // Set initial guess
     let initial_guess = initial_guess_arg.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist())
-            .expect("'{solution_str}' is not in the wordlist, choose a different word as the solution")
+        find_word_in_wordlist(item, wordle.wordlist()).expect(
+            "'{solution_str}' is not in the wordlist, choose a different word as the solution",
+        )
     });
 
     match guesser_arg {
@@ -132,8 +131,7 @@ fn play(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>, solutio
             } else {
                 println!("Guesser did not find a solution!");
             };
-
-        },
+        }
     };
 }
 
@@ -141,15 +139,26 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Cmd::Play { guesser, initial_guess, solution } => {
+        Cmd::Play {
+            guesser,
+            initial_guess,
+            solution,
+        } => {
             play(guesser, initial_guess, solution);
-        },
-        Cmd::Solve { guesser, initial_guess } => {
+        }
+        Cmd::Solve {
+            guesser,
+            initial_guess,
+        } => {
             solve(guesser, initial_guess);
-        },
-        Cmd::Benchmark { guesser, initial_guess, max_games } => {
+        }
+        Cmd::Benchmark {
+            guesser,
+            initial_guess,
+            max_games,
+        } => {
             benchmark(guesser, max_games, initial_guess);
-        },
+        }
         Cmd::Precompute {} => {
             compute_best_initial_guesses();
         }
@@ -161,8 +170,9 @@ fn solve(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>) {
 
     // Set initial guess
     let initial_guess = initial_guess_arg.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist())
-            .expect("'{solution_str}' is not in the wordlist, choose a different word as the solution")
+        find_word_in_wordlist(item, wordle.wordlist()).expect(
+            "'{solution_str}' is not in the wordlist, choose a different word as the solution",
+        )
     });
 
     match guesser_arg {
@@ -183,18 +193,22 @@ fn solve(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>) {
                 guesser.set_initial_guess(guess);
             }
             wordle.interactive_solve(guesser);
-        },
+        }
     };
-
 }
 
-fn benchmark(guesser_arg: Option<GuesserTypeEnum>, max_games: Option<usize>, initial_guess: Option<String>) {
+fn benchmark(
+    guesser_arg: Option<GuesserTypeEnum>,
+    max_games: Option<usize>,
+    initial_guess: Option<String>,
+) {
     let wordle = Wordle::new();
 
     // Set initial guess
     let initial_guess = initial_guess.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist())
-            .expect("'{solution_str}' is not in the wordlist, choose a different word as the solution")
+        find_word_in_wordlist(item, wordle.wordlist()).expect(
+            "'{solution_str}' is not in the wordlist, choose a different word as the solution",
+        )
     });
 
     let make_entropy_guesser = || {
@@ -216,11 +230,11 @@ fn benchmark(guesser_arg: Option<GuesserTypeEnum>, max_games: Option<usize>, ini
         Some(GuesserTypeEnum::MaxEntropyGuesser) => {
             println!("Benchmarking MaxEntropyGuesser");
             wordle.benchmark(make_entropy_guesser, max_games);
-        },
+        }
         Some(GuesserTypeEnum::MinExpectedScoreGuesser) => {
             println!("Benchmarking MinExpectedScoreGuesser");
             wordle.benchmark(make_expected_score_guesser, max_games);
-        },
+        }
         None => {
             println!("Benchmarking MaxEntropyGuesser");
             wordle.benchmark(make_entropy_guesser, max_games);
@@ -243,13 +257,26 @@ fn compute_best_initial_guesses() {
     println!("{best_l1_guess:?}");
     println!("took {duration:.2}s");
 
-
     println!("\nBest guess considering expected information gain after 2 rounds:");
     let guesser = MaxEntropyGuesser::new();
+
+    // guesser.use_wordlist_subset(1500);
+
+
+
+    // 1000^3 <-> 15s
+    // 1000 <-> 2.46
+    //
+    // 14000 <-> 36s
+    // 14000^3 <-> 49121s = 818m = 13.6h
+    //
+    // 2000^3 <-> 120s = 2m (actually was 150s)
+    //
+    // 3000^3 <-> 404s = 7m (actually was 521s)
+
     let start = Instant::now();
     let (combined_entropy, best_l2_guess) = guesser.compute_best_initial_guess();
     let duration = start.elapsed().as_secs_f64();
     println!("{best_l2_guess:?}\nExpected information gain after 2 rounds: {combined_entropy}");
     println!("took {duration:.2}s");
-
 }

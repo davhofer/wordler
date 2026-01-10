@@ -1,6 +1,9 @@
 use hashbrown::HashSet;
-use std::{collections::HashMap, io::{self, Write, stdin, stdout}};
 use rand::{rng, seq::IteratorRandom};
+use std::{
+    collections::HashMap,
+    io::{self, Write, stdin, stdout},
+};
 
 mod guessers;
 pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
@@ -8,7 +11,10 @@ pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
 /// Wordlist containing all possible guesses and solutions.
 const WORDS: &str = include_str!("../words.txt");
 
-pub fn find_word_in_wordlist(word: String, wordlist: &HashSet<&'static str>) -> Option<&'static str> {
+pub fn find_word_in_wordlist(
+    word: String,
+    wordlist: &HashSet<&'static str>,
+) -> Option<&'static str> {
     wordlist
         .iter()
         .filter(|&&candidate| candidate == word)
@@ -34,28 +40,32 @@ impl Wordle {
                 return Some(i);
             }
             let feedback = compute_feedback(solution, guess);
-            guesser.update_state(GuessResult{ guess, feedback });
+            guesser.update_state(GuessResult { guess, feedback });
         }
-        None 
+        None
     }
 
     pub fn interactive_solve<G: Guesser>(&self, mut guesser: G) {
         println!("Let's solve a wordle puzzle together.");
-        println!("I will propose the words to guess, and you respond with the resulting color pattern. Please write the pattern as 5 single characters separated by spaces. Use C (correct) for green, M (misplaced) for yellow, and W (wrong) for grey.\nFor example, the pattern [Green, Grey, Yellow, Grey, Grey] should be denoted as 'C W M W W'.");
+        println!(
+            "I will propose the words to guess, and you respond with the resulting color pattern. Please write the pattern as 5 single characters separated by spaces. Use C (correct) for green, M (misplaced) for yellow, and W (wrong) for grey.\nFor example, the pattern [Green, Grey, Yellow, Grey, Grey] should be denoted as 'C W M W W'."
+        );
 
         for i in 1..=6 {
             let guess = guesser.guess().get_string();
             println!("Guess #{i}: {}", guess);
 
             let pattern = get_userinput();
-            let feedback_vec: Vec<_> = pattern.trim().split_whitespace().map(|c| {
-                match c {
+            let feedback_vec: Vec<_> = pattern
+                .trim()
+                .split_whitespace()
+                .map(|c| match c {
                     "C" => Feedback::Correct,
                     "M" => Feedback::Misplaced,
                     "W" => Feedback::Wrong,
                     _ => panic!("only enter 'C', 'M', or 'W'"),
-                }
-            }).collect();
+                })
+                .collect();
 
             if feedback_vec.len() != 5 {
                 panic!("you need to enter exactly 5 characters");
@@ -76,12 +86,11 @@ impl Wordle {
         &self.words
     }
 
-    pub fn benchmark<F, G>(&self, make_guesser: F, max_games: Option<usize>) 
-    where 
+    pub fn benchmark<F, G>(&self, make_guesser: F, max_games: Option<usize>)
+    where
         F: Fn() -> G,
         G: Guesser,
     {
-
         // TODO: compute average information gain after n rounds (to check if it matches with
         // expectation for initial guess)
 
@@ -109,23 +118,27 @@ impl Wordle {
             }
 
             if i % 10 == 0 {
-                print!("\rProgress: {:.2}%", ((i as f64)/total_games) * 100.0);
+                print!("\rProgress: {:.2}%", ((i as f64) / total_games) * 100.0);
                 io::stdout().flush().unwrap();
             }
         }
 
         let failed_games = failed.len();
 
-
         println!("\rProgress: 100%     ");
         io::stdout().flush().unwrap();
         println!("Benchmark complete!");
-        println!("Games: {}, Avg guesses: {}, Failures: {} ({}%)", total_games, (total_guesses as f64)/total_games, failed_games, ((failed_games as f64)/total_games) * 100.0);
-
+        println!(
+            "Games: {}, Avg guesses: {}, Failures: {} ({}%)",
+            total_games,
+            (total_guesses as f64) / total_games,
+            failed_games,
+            ((failed_games as f64) / total_games) * 100.0
+        );
 
         println!("Num guesses histogram:");
         for i in 1..=10 {
-            println!("{} guesses: {}", i, *guesses_hist.get(&i).unwrap_or(&0)) ;
+            println!("{} guesses: {}", i, *guesses_hist.get(&i).unwrap_or(&0));
         }
         println!("11+ guesses (fail): {}", failed_games);
 
@@ -134,18 +147,19 @@ impl Wordle {
             println!("{w}");
         }
     }
-
 }
 
 fn get_userinput() -> String {
     let mut s = String::new();
     print!("Please enter the pattern using C, M, and W: ");
     let _ = stdout().flush();
-    stdin().read_line(&mut s).expect("Did not enter a correct string");
-    if let Some('\n')=s.chars().next_back() {
+    stdin()
+        .read_line(&mut s)
+        .expect("Did not enter a correct string");
+    if let Some('\n') = s.chars().next_back() {
         s.pop();
     }
-    if let Some('\r')=s.chars().next_back() {
+    if let Some('\r') = s.chars().next_back() {
         s.pop();
     }
     s
@@ -153,9 +167,9 @@ fn get_userinput() -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Feedback {
-    Correct, // Green
+    Correct,   // Green
     Misplaced, // Yellow
-    Wrong, // Gray
+    Wrong,     // Gray
 }
 
 pub fn compute_feedback(solution: &str, guess: &str) -> [Feedback; 5] {
@@ -187,26 +201,33 @@ pub fn compute_feedback(solution: &str, guess: &str) -> [Feedback; 5] {
     mask
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum GuessType {
-    Entropy { entropy: f64, solution_probability: f64 },
-    ExpectedScore { score: f64 },
+    Entropy {
+        entropy: f64,
+        solution_probability: f64,
+    },
+    ExpectedScore {
+        score: f64,
+    },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Guess {
     guess: &'static str,
     variant: GuessType,
 }
 
 impl Guess {
-
-    // TODO: different ways of computing guess quality? 
+    // TODO: different ways of computing guess quality?
     pub fn quality(&self) -> f64 {
         match self.variant {
-            GuessType::Entropy { entropy, solution_probability } => entropy + solution_probability,
+            GuessType::Entropy {
+                entropy,
+                solution_probability,
+            } => entropy + solution_probability,
             GuessType::ExpectedScore { score } => score, // TODO: bad interface, for this variant
-            // lower quality is better...
+                                                         // lower quality is better...
         }
     }
 
@@ -216,7 +237,10 @@ impl Guess {
 
     pub fn unwrap_entropy(&self) -> (f64, f64) {
         match self.variant {
-            GuessType::Entropy { entropy, solution_probability } => (entropy, solution_probability),
+            GuessType::Entropy {
+                entropy,
+                solution_probability,
+            } => (entropy, solution_probability),
             _ => panic!("Called unwrap_entropy on a non-Entropy guess!"),
         }
     }
@@ -235,7 +259,6 @@ pub struct GuessResult {
 }
 
 pub trait Guesser {
-    
     /// Produce a new guess given the wordlist and prior guesses.
     ///
     /// (Note: the prior guesses are used to compute the list of possible solutions inside of
@@ -253,7 +276,6 @@ pub trait Guesser {
     // set of currently possible solutions
     fn possible_solutions(&self) -> &HashSet<&'static str>;
 }
-
 
 // ADAPTED FROM https://github.com/jonhoo/roget/blob/main/src/lib.rs
 #[cfg(test)]
