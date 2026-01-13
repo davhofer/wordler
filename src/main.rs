@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::time::Instant;
-use wordler::{MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle, find_word_in_wordlist};
+use std::{time::Instant};
+use wordler::{
+    FeedbackStorage, MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle, find_word_in_wordlist,
+};
+
+const BENCH_SOLUTIONS: [&str; 3] = ["doved", "jings", "vaxes"];
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -10,8 +14,6 @@ struct Args {
     command: Cmd,
 }
 
-// _ => println!("Please provide one of the following commands: 'play-random', 'benchmark', 'solve', or 'precompute-guesses'"),
-//
 /// Wordle solver
 #[derive(Debug, Subcommand)]
 #[command()]
@@ -46,9 +48,16 @@ enum Cmd {
         max_games: Option<usize>,
     },
 
-    /// Precompute the best initial guesses
+    /// Precompute the best first guess
     #[command()]
-    Precompute {},
+    PrecomputeInitialGuess {},
+
+    /// Precompute all pairwise feedback patterns
+    #[command()]
+    PrecomputePatterns {},
+
+    #[command()]
+    CustomBench {},
 
     /// Let the bot play a game
     #[command()]
@@ -107,12 +116,11 @@ fn play(
 
     match guesser_arg {
         GuesserTypeEnum::MaxEntropyGuesser => {
-            let mut guesser = MaxEntropyGuesser::new();
-            guesser.set_verbose();
+            let guesser = MaxEntropyGuesser::builder()
+                .verbose()
+                .initial_guess_option(initial_guess)
+                .build();
 
-            if let Some(guess) = initial_guess {
-                guesser.set_initial_guess(guess);
-            }
             if let Some(guesses) = wordle.play(solution, guesser) {
                 println!("Solved wordle in {guesses} guesses!");
             } else {
@@ -159,8 +167,14 @@ fn main() {
         } => {
             benchmark(guesser, max_games, initial_guess);
         }
-        Cmd::Precompute {} => {
+        Cmd::PrecomputeInitialGuess {} => {
             compute_best_initial_guesses();
+        }
+        Cmd::CustomBench {} => {
+            custom_bench();
+        }
+        Cmd::PrecomputePatterns {} => {
+            precompute_patterns();
         }
     }
 }
@@ -177,12 +191,10 @@ fn solve(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>) {
 
     match guesser_arg {
         GuesserTypeEnum::MaxEntropyGuesser => {
-            let mut guesser = MaxEntropyGuesser::new();
-            guesser.set_verbose();
-
-            if let Some(guess) = initial_guess {
-                guesser.set_initial_guess(guess);
-            }
+            let guesser = MaxEntropyGuesser::builder()
+                .verbose()
+                .initial_guess_option(initial_guess)
+                .build();
             wordle.interactive_solve(guesser);
         }
         GuesserTypeEnum::MinExpectedScoreGuesser => {
@@ -206,17 +218,16 @@ fn benchmark(
 
     // Set initial guess
     let initial_guess = initial_guess.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist()).expect(
-            "'{solution_str}' is not in the wordlist, choose a different word as the solution",
-        )
+        let err = format!(
+            "'{item}' is not in the wordlist, choose a different word as the initial guess"
+        );
+        find_word_in_wordlist(item, wordle.wordlist()).expect(&err)
     });
 
     let make_entropy_guesser = || {
-        let mut guesser = MaxEntropyGuesser::new();
-        if let Some(guess) = initial_guess {
-            guesser.set_initial_guess(guess);
-        }
-        guesser
+        MaxEntropyGuesser::builder()
+            .initial_guess_option(initial_guess)
+            .build()
     };
     let make_expected_score_guesser = || {
         let mut guesser = MinExpectedScoreGuesser::new();
@@ -244,6 +255,49 @@ fn benchmark(
     };
 }
 
+fn custom_bench() {
+    let wordle = Wordle::new();
+
+    let feedback_storage = FeedbackStorage::load().unwrap();
+    let guesser = MaxEntropyGuesser::builder().precomputed_patterns(feedback_storage).build();
+
+    let start = Instant::now();
+
+    let _ = wordle.play("oomph", guesser);
+
+    let duration = (Instant::now() - start).as_secs_f32();
+    println!("took {duration:.2}s")
+
+    //
+    //
+    // println!("Custom benchmark for MaxEntropyGuesser");
+    //
+    // println!("Playing {} games", BENCH_SOLUTIONS.len());
+    // for solution in BENCH_SOLUTIONS {
+    //     let mut guesser = MaxEntropyGuesser::new();
+    //     if use_feedback_storage {
+    //         let feedback_storage = FeedbackStorage::load().unwrap();
+    //         guesser.use_precomputed_patterns(feedback_storage);
+    //     }
+    //     let _ = wordle.play(&solution, guesser);
+    // }
+    //
+    // let wordlist_size: usize = 800;
+    //
+    // println!("Computing best l2 guess with wordlist_size={wordlist_size}");
+    //
+    // let mut guesser = MaxEntropyGuesser::new();
+    // guesser.use_wordlist_subset(wordlist_size);
+    //
+    //
+    // if use_feedback_storage {
+    //     let feedback_storage = FeedbackStorage::load().unwrap();
+    //     guesser.use_precomputed_patterns(feedback_storage);
+    // }
+    //
+    // let _ = guesser.compute_best_initial_guess();
+}
+
 fn compute_best_initial_guesses() {
     let wordle = Wordle::new();
 
@@ -262,8 +316,6 @@ fn compute_best_initial_guesses() {
 
     // guesser.use_wordlist_subset(1500);
 
-
-
     // 1000^3 <-> 15s
     // 1000 <-> 2.46
     //
@@ -279,4 +331,15 @@ fn compute_best_initial_guesses() {
     let duration = start.elapsed().as_secs_f64();
     println!("{best_l2_guess:?}\nExpected information gain after 2 rounds: {combined_entropy}");
     println!("took {duration:.2}s");
+}
+
+fn precompute_patterns() {
+    let start = Instant::now();
+    if let Err(e) = FeedbackStorage::build_and_save() {
+        println!("Error while saving feedback pattern storage: {e}")
+    } else {
+        println!("Feedback pattern storage saved successfully!");
+    }
+    let duration = (Instant::now() - start).as_secs();
+    println!("took {duration:.2}s")
 }
