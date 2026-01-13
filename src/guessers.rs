@@ -1,4 +1,4 @@
-use crate::{Feedback, Guess, GuessResult, GuessType, Guesser, WORDS, compute_feedback};
+use crate::{Feedback, FeedbackStorage, Guess, GuessResult, GuessType, Guesser, WORDS};
 use dashmap::DashMap;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
@@ -21,7 +21,7 @@ fn pattern_partitions(
     // for each potential solution, compute corresponding feedback pattern
     for solution in possible_solutions {
         pattern_buckets
-            .entry(compute_feedback(solution, guess))
+            .entry(Feedback::compute(solution, guess))
             .or_insert(HashSet::new())
             .insert(solution);
     }
@@ -33,6 +33,7 @@ struct SolutionSetKey {
     indices: Vec<usize>,
 }
 
+// TODO: change hash function/key to make more efficient
 impl SolutionSetKey {
     fn from_set(
         solutions: &HashSet<&'static str>,
@@ -47,49 +48,96 @@ impl SolutionSetKey {
     }
 }
 
+pub struct MaxEntropyGuesserBuilder {
+    wordlist_subset: Option<usize>,
+    feedback_storage: Option<FeedbackStorage>,
+    verbose: bool,
+    initial_guess: Option<&'static str>,
+}
+
+impl MaxEntropyGuesserBuilder {
+    pub fn new() -> Self {
+        Self { wordlist_subset: None, feedback_storage: None, verbose: false, initial_guess: None }
+    }
+
+    pub fn wordlist_subset(mut self, size: usize) -> Self {
+        self.wordlist_subset = Some(size);
+        self
+    }
+
+    pub fn precomputed_patterns(mut self, feedback_storage: FeedbackStorage) -> Self {
+        self.feedback_storage = Some(feedback_storage);
+        self
+    }
+
+    pub fn verbose(mut self) -> Self {
+        self.verbose = true;
+        self
+    }
+
+    pub fn initial_guess(mut self, initial_guess: &'static str) -> Self {
+        self.initial_guess = Some(initial_guess);
+        self
+    }
+
+    pub fn initial_guess_option(mut self, initial_guess: Option<&'static str>) -> Self {
+        self.initial_guess = initial_guess;
+        self
+    }
+
+    pub fn build(self) -> MaxEntropyGuesser {
+        let wordlist: HashSet<&'static str> = match self.wordlist_subset {
+            Some(size) => WORDS.split_whitespace().take(size).collect(),
+            None => WORDS.split_whitespace().collect(),
+        };
+        let possible_solutions: HashSet<&'static str> = wordlist.clone();
+
+        let word_to_idx = wordlist
+            .iter()
+            .enumerate()
+            .map(|(i, &word)| (word, i))
+            .collect();
+
+        MaxEntropyGuesser {
+            wordlist,
+            possible_solutions,
+            initial_guess: self.initial_guess,
+            verbose: self.verbose,
+            guesses_made: 0,
+            best_guess_cache: DashMap::new(),
+            word_to_idx,
+            feedback_storage: self.feedback_storage,
+        }
+    }
+}
+
 pub struct MaxEntropyGuesser {
     possible_solutions: HashSet<&'static str>,
     wordlist: HashSet<&'static str>,
     initial_guess: Option<&'static str>,
     verbose: bool,
     guesses_made: u32,
-    best_guess_cache: DashMap<SolutionSetKey, (Guess, f32)>,
+    best_guess_cache: DashMap<SolutionSetKey, Guess>,
     word_to_idx: HashMap<&'static str, usize>,
+    feedback_storage: Option<FeedbackStorage>,
 }
 
 // TODO: don't just compute the best initial guess, compute top n
 
 impl MaxEntropyGuesser {
+    pub fn builder() -> MaxEntropyGuesserBuilder {
+        MaxEntropyGuesserBuilder::new()
+    }
+    
     pub fn new() -> Self {
-        let wordlist: HashSet<&'static str> = WORDS.split_whitespace().collect();
-        let possible_solutions: HashSet<&'static str> = WORDS.split_whitespace().collect();
-        let word_to_idx: HashMap<&'static str, usize> = wordlist
-            .iter()
-            .enumerate()
-            .map(|(i, &word)| (word, i))
-            .collect();
-        Self {
-            wordlist,
-            possible_solutions,
-            initial_guess: None,
-            verbose: false,
-            guesses_made: 0,
-            best_guess_cache: DashMap::new(),
-            word_to_idx,
+        Self::builder().build()
+    }
+    fn get_feedback(&self, solution: &'static str, guess: &'static str) -> [Feedback; 5] {
+        if let Some(storage) = &self.feedback_storage {
+            storage.get(solution, guess).unwrap()
+        } else {
+            Feedback::compute(solution, guess)
         }
-    }
-
-    pub fn use_wordlist_subset(&mut self, size: usize) {
-        self.wordlist = WORDS.split_whitespace().take(size).collect();
-        self.possible_solutions = self.wordlist.clone();
-    }
-
-    pub fn set_verbose(&mut self) {
-        self.verbose = true;
-    }
-
-    pub fn set_initial_guess(&mut self, guess: &'static str) {
-        self.initial_guess = Some(guess);
     }
 
     fn update_possible_solutions(&mut self, result: &GuessResult) {
@@ -98,7 +146,7 @@ impl MaxEntropyGuesser {
             .iter()
             .filter_map(|word| {
                 // if word would give the same result mask as the guess, keep it, otherwise drop it
-                if compute_feedback(word, &result.guess) == result.feedback {
+                if self.get_feedback(word, &result.guess) == result.feedback {
                     Some(*word)
                 } else {
                     None
@@ -107,8 +155,6 @@ impl MaxEntropyGuesser {
             .collect();
     }
 
-    // TODO: would we benefit from clearing the cache once in a while? do we risk hash collisions?
-    // performance loss?
     pub fn compute_best_guess(&self, possible_solutions: &HashSet<&'static str>) -> Guess {
         let size = possible_solutions.len();
         // base case for performance
@@ -126,14 +172,8 @@ impl MaxEntropyGuesser {
         if size >= 10
             && let Some(cached) = self.best_guess_cache.get(&key)
         {
-            let duration = (*cached).1;
-            // println!(
-            //     "cache hit! saved {duration:.2}s, set size: {}",
-            //     possible_solutions.len()
-            // );
-            return (*cached).0.clone();
+            return (*cached).clone();
         }
-        let start = Instant::now();
 
         // let map_func = |&guess_str| {
         //     let mut pattern_counts: HashMap<[Feedback; 5], f64> = HashMap::new();
@@ -143,7 +183,7 @@ impl MaxEntropyGuesser {
         //
         //     for solution in possible_solutions {
         //         *pattern_counts
-        //             .entry(compute_feedback(solution, guess_str))
+        //             .entry(Feedback::compute(solution, guess_str))
         //             .or_insert(0.0) += 1.0;
         //     }
         //     let entropy = -pattern_counts
@@ -187,25 +227,24 @@ impl MaxEntropyGuesser {
             .wordlist()
             .par_iter()
             .map(|guess_str| {
-                let mut pattern_counts: HashMap<[Feedback; 5], f64> = HashMap::new();
+                let mut pattern_counts: HashMap<[Feedback; 5], usize> = HashMap::new();
 
                 let num_solutions = possible_solutions.len() as f64;
                 let uniform_solution_proba = 1.0 / num_solutions;
 
                 for solution in possible_solutions {
                     *pattern_counts
-                        .entry(compute_feedback(solution, guess_str))
-                        .or_insert(0.0) += 1.0;
+                        .entry(self.get_feedback(solution, guess_str))
+                        .or_insert(0) += 1;
                 }
                 let entropy = -pattern_counts
                     .iter()
                     .map(|(_, count)| {
-                        let p = *count / num_solutions;
+                        let p = (*count as f64) / num_solutions;
                         p * p.log2()
                     })
                     .sum::<f64>();
 
-                // println!("Entropy: {entropy}");
                 Guess {
                     guess: guess_str,
                     variant: GuessType::Entropy {
@@ -222,9 +261,8 @@ impl MaxEntropyGuesser {
             .unwrap();
 
         if size >= 10 {
-            let duration = (Instant::now() - start).as_secs_f32();
             self.best_guess_cache
-                .insert(key, (result.clone(), duration));
+                .insert(key, result.clone());
         }
         result
     }
@@ -403,7 +441,7 @@ impl MinExpectedScoreGuesser {
             .iter()
             .filter_map(|word| {
                 // if word would give the same result mask as the guess, keep it, otherwise drop it
-                if compute_feedback(word, &result.guess) == result.feedback {
+                if Feedback::compute(word, &result.guess) == result.feedback {
                     Some(*word)
                 } else {
                     None
