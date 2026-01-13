@@ -1,15 +1,19 @@
 use hashbrown::HashSet;
 use rand::{rng, seq::IteratorRandom};
+use std::fs::File;
+use std::path::PathBuf;
 use std::{
     collections::HashMap,
-    io::{self, Write, stdin, stdout},
+    io::{self, Read, Write, stdin, stdout},
 };
+use wincode::{self, containers, len::BincodeLen, SchemaRead, SchemaWrite};
+// use wincode::containers::Vec;
 
 mod guessers;
 pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
 
 /// Wordlist containing all possible guesses and solutions.
-const WORDS: &str = include_str!("../words.txt");
+const WORDS: &str = include_str!("../data/words.txt");
 
 pub fn find_word_in_wordlist(
     word: String,
@@ -39,7 +43,7 @@ impl Wordle {
             if guess == solution {
                 return Some(i);
             }
-            let feedback = compute_feedback(solution, guess);
+            let feedback = Feedback::compute(solution, guess);
             guesser.update_state(GuessResult { guess, feedback });
         }
         None
@@ -165,40 +169,128 @@ fn get_userinput() -> String {
     s
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Feedback {
     Correct,   // Green
     Misplaced, // Yellow
     Wrong,     // Gray
 }
 
-pub fn compute_feedback(solution: &str, guess: &str) -> [Feedback; 5] {
-    let mut used = [false; 5];
-    let mut mask = [Feedback::Wrong; 5];
+#[derive(SchemaRead, SchemaWrite)]
+struct FeedbackVec {
+    #[wincode(with = "containers::Vec<[Feedback; 5], BincodeLen<{ 2 * 1024 * 1024 * 1024 }>>")]
+    pub entries: Vec<[Feedback; 5]>,
+}
 
-    let guess_vec: Vec<_> = guess.chars().collect();
+impl FeedbackVec {
+    pub fn load(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        // 1. Read file contents into a buffer
+        let mut file = File::open(path)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        // required size = 2 * 1024 * 1024 * 1024usize; // 2 GiB
 
-    for (i, letter) in solution.char_indices() {
-        if letter == guess_vec[i] {
-            used[i] = true;
-            mask[i] = Feedback::Correct;
-        }
+        // 2. Deserialize into the storage type
+        let vec: Self = wincode::deserialize(&buffer)?;
+
+        Ok(vec)
     }
 
-    for (i, letter) in guess_vec.iter().enumerate() {
-        if mask[i] == Feedback::Correct {
-            continue;
-        }
+    pub fn store(&self, path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = wincode::serialize(self)?;
 
-        for (j, c) in solution.char_indices() {
-            if !used[j] && *letter == c {
-                used[j] = true;
-                mask[i] = Feedback::Misplaced;
-                break;
+        let mut file = File::create(path)?;
+        file.write_all(&encoded)?;
+
+        Ok(())
+    }
+}
+
+pub struct FeedbackStorage {
+    wordlist_size: usize,
+    data: FeedbackVec,
+    word_to_idx: HashMap<&'static str, usize>,
+}
+
+
+impl FeedbackStorage {
+
+    fn get_storage_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("feedback_patterns.storage")
+    }
+
+    pub fn get(&self, solution: &'static str, guess: &'static str) -> Option<[Feedback; 5]> {
+        let sol_idx = self.word_to_idx.get(solution)?;
+        let guess_idx = self.word_to_idx.get(guess)?;
+        let idx = guess_idx * self.wordlist_size + sol_idx;
+        assert!(
+            idx < self.data.entries.len(),
+            "precomputed FeedbackVec is to small, has it been properly initialized?"
+        );
+        Some(self.data.entries[idx])
+    }
+
+    pub fn build_and_save() -> Result<(), Box<dyn std::error::Error>> {
+        let words: Vec<&'static str> = WORDS.split_whitespace().collect();
+        let n = words.len();
+        let mut entries: Vec<[Feedback; 5]> = std::vec::Vec::with_capacity(n * n);
+
+        for &guess in &words {
+            for &solution in &words {
+                entries.push(Feedback::compute(solution, guess));
             }
         }
+
+        FeedbackVec { entries }.store(Self::get_storage_path())
     }
-    mask
+
+    /// Load the precomputed feedback storage from a file and initialize it
+    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let words: Vec<&'static str> = WORDS.split_whitespace().collect();
+        let word_to_idx: HashMap<&str, usize> =
+            words.iter().enumerate().map(|(i, &w)| (w, i)).collect();
+        // TODO: load from file
+        let feedback_vec = FeedbackVec::load(Self::get_storage_path())?;
+
+        Ok(Self {
+            wordlist_size: words.len(),
+            data: feedback_vec,
+            word_to_idx,
+        })
+    }
+}
+
+impl Feedback {
+    pub fn compute(solution: &str, guess: &str) -> [Self; 5] {
+        let mut used = [false; 5];
+        let mut mask = [Self::Wrong; 5];
+
+        let guess_vec: Vec<_> = guess.chars().collect();
+
+        for (i, letter) in solution.char_indices() {
+            if letter == guess_vec[i] {
+                used[i] = true;
+                mask[i] = Self::Correct;
+            }
+        }
+
+        for (i, letter) in guess_vec.iter().enumerate() {
+            if mask[i] == Self::Correct {
+                continue;
+            }
+
+            for (j, c) in solution.char_indices() {
+                if !used[j] && *letter == c {
+                    used[j] = true;
+                    mask[i] = Self::Misplaced;
+                    break;
+                }
+            }
+        }
+        mask
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -290,52 +382,150 @@ macro_rules! mask {
 
 #[cfg(test)]
 mod tests {
+    mod play {
+        use crate::{Wordle, MaxEntropyGuesser};
+
+        #[test]
+        fn guess_found1() {
+            let wordle = Wordle::new();
+            let guesser = MaxEntropyGuesser::builder()
+                .initial_guess("tares")
+                .build();
+            let sol_found = if let Some(_) = wordle.play("tares", guesser) {
+                true
+            } else {
+                false
+            };
+            assert!(sol_found);
+        }
+
+        #[test]
+        fn guess_found2() {
+            let wordle = Wordle::new();
+            let guesser = MaxEntropyGuesser::builder()
+                .initial_guess("tares")
+                .build();
+            let sol_found = if let Some(_) = wordle.play("oomph", guesser) {
+                true
+            } else {
+                false
+            };
+            assert!(sol_found);
+        }
+
+        #[test]
+        fn guess_found3() {
+            let wordle = Wordle::new();
+            let guesser = MaxEntropyGuesser::builder()
+                .initial_guess("tares")
+                .build();
+            let sol_found = if let Some(_) = wordle.play("aargh", guesser) {
+                true
+            } else {
+                false
+            };
+            assert!(sol_found);
+        }
+
+        #[test]
+        fn guess_found4() {
+            let wordle = Wordle::new();
+            let guesser = MaxEntropyGuesser::builder()
+                .initial_guess("tares")
+                .build();
+            let sol_found = if let Some(_) = wordle.play("bobby", guesser) {
+                true
+            } else {
+                false
+            };
+            assert!(sol_found);
+        }
+
+        #[test]
+        fn guess_found5() {
+            let wordle = Wordle::new();
+            let guesser = MaxEntropyGuesser::builder()
+                .initial_guess("tares")
+                .build();
+            let sol_found = if let Some(_) = wordle.play("pulse", guesser) {
+                true
+            } else {
+                false
+            };
+            assert!(sol_found);
+        }
+
+    }
     mod compute {
-        use crate::compute_feedback;
+        use crate::Feedback;
 
         #[test]
         fn all_green() {
-            assert_eq!(compute_feedback("abcde", "abcde"), mask![C C C C C]);
+            assert_eq!(Feedback::compute("abcde", "abcde"), mask![C C C C C]);
         }
 
         #[test]
         fn all_gray() {
-            assert_eq!(compute_feedback("abcde", "fghij"), mask![W W W W W]);
+            assert_eq!(Feedback::compute("abcde", "fghij"), mask![W W W W W]);
         }
 
         #[test]
         fn all_yellow() {
-            assert_eq!(compute_feedback("abcde", "eabcd"), mask![M M M M M]);
+            assert_eq!(Feedback::compute("abcde", "eabcd"), mask![M M M M M]);
         }
 
         #[test]
         fn repeat_green() {
-            assert_eq!(compute_feedback("aabbb", "aaccc"), mask![C C W W W]);
+            assert_eq!(Feedback::compute("aabbb", "aaccc"), mask![C C W W W]);
         }
 
         #[test]
         fn repeat_yellow() {
-            assert_eq!(compute_feedback("aabbb", "ccaac"), mask![W W M M W]);
+            assert_eq!(Feedback::compute("aabbb", "ccaac"), mask![W W M M W]);
         }
 
         #[test]
         fn repeat_some_green() {
-            assert_eq!(compute_feedback("aabbb", "caacc"), mask![W C M W W]);
+            assert_eq!(Feedback::compute("aabbb", "caacc"), mask![W C M W W]);
         }
 
         #[test]
         fn dremann_from_chat() {
-            assert_eq!(compute_feedback("azzaz", "aaabb"), mask![C M W W W]);
+            assert_eq!(Feedback::compute("azzaz", "aaabb"), mask![C M W W W]);
         }
 
         #[test]
         fn itsapoque_from_chat() {
-            assert_eq!(compute_feedback("baccc", "aaddd"), mask![W C W W W]);
+            assert_eq!(Feedback::compute("baccc", "aaddd"), mask![W C W W W]);
         }
 
         #[test]
         fn ricoello_from_chat() {
-            assert_eq!(compute_feedback("abcde", "aacde"), mask![C W C C C]);
+            assert_eq!(Feedback::compute("abcde", "aacde"), mask![C W C C C]);
+        }
+    }
+    mod feedback_vec {
+        use std::path::PathBuf;
+        use crate::{FeedbackVec, Feedback};
+
+        #[test]
+        fn serialize_deserialize() {
+            let feedback_vec = FeedbackVec { entries: vec![[Feedback::Correct; 5]; 1024 * 1024 * 1024] };
+            let path = PathBuf::from("tmp_feedback.storage");
+            let res = feedback_vec.store(path);
+            if let Ok(_) = res {} else {
+                assert!(false);
+            }
+            drop(feedback_vec);
+
+            let path = PathBuf::from("tmp_feedback.storage");
+            if let Ok(feedback_vec) = FeedbackVec::load(path) {
+                assert_eq!(feedback_vec.entries[0], [Feedback::Correct; 5]);
+                assert_eq!(feedback_vec.entries[1024 * 1024], [Feedback::Correct; 5]);
+                assert_eq!(feedback_vec.entries[1024 * 1024 * 1024 - 1], [Feedback::Correct; 5]);
+            } else {
+                assert!(false);
+            }
         }
     }
 }
