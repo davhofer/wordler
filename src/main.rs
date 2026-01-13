@@ -1,10 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::{time::Instant};
+use std::time::Instant;
 use wordler::{
-    FeedbackStorage, MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle, find_word_in_wordlist,
+    FeedbackStorage, MaxEntropyGuesser, MinExpectedScoreGuesser, Wordle, find_string_in_wordlist,
 };
-
-const BENCH_SOLUTIONS: [&str; 3] = ["doved", "jings", "vaxes"];
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -90,6 +88,9 @@ enum GuesserTypeEnum {
 //     }
 // }
 
+// TODO: cli options/control over feedback pattern precomputation. e.g. if it is not found, ask if
+// it should be computed, or at least tell the user to first run precomputation
+
 fn play(
     guesser_arg: GuesserTypeEnum,
     initial_guess_arg: Option<String>,
@@ -98,7 +99,7 @@ fn play(
     let wordle = Wordle::new();
 
     let solution = if let Some(solution_str) = solution_arg {
-        find_word_in_wordlist(solution_str, wordle.wordlist()).expect(
+        find_string_in_wordlist(solution_str, wordle.wordlist()).expect(
             "'{solution_str}' is not in the wordlist, choose a different word as the solution",
         )
     } else {
@@ -109,7 +110,7 @@ fn play(
 
     // Set initial guess
     let initial_guess = initial_guess_arg.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist()).expect(
+        find_string_in_wordlist(item, wordle.wordlist()).expect(
             "'{solution_str}' is not in the wordlist, choose a different word as the solution",
         )
     });
@@ -184,7 +185,7 @@ fn solve(guesser_arg: GuesserTypeEnum, initial_guess_arg: Option<String>) {
 
     // Set initial guess
     let initial_guess = initial_guess_arg.map(|item| {
-        find_word_in_wordlist(item, wordle.wordlist()).expect(
+        find_string_in_wordlist(item, wordle.wordlist()).expect(
             "'{solution_str}' is not in the wordlist, choose a different word as the solution",
         )
     });
@@ -221,7 +222,7 @@ fn benchmark(
         let err = format!(
             "'{item}' is not in the wordlist, choose a different word as the initial guess"
         );
-        find_word_in_wordlist(item, wordle.wordlist()).expect(&err)
+        find_string_in_wordlist(item, wordle.wordlist()).expect(&err)
     });
 
     let make_entropy_guesser = || {
@@ -259,7 +260,9 @@ fn custom_bench() {
     let wordle = Wordle::new();
 
     let feedback_storage = FeedbackStorage::load().unwrap();
-    let guesser = MaxEntropyGuesser::builder().precomputed_patterns(feedback_storage).build();
+    let guesser = MaxEntropyGuesser::builder()
+        .precomputed_patterns(feedback_storage)
+        .build();
 
     let start = Instant::now();
 
@@ -312,7 +315,11 @@ fn compute_best_initial_guesses() {
     println!("took {duration:.2}s");
 
     println!("\nBest guess considering expected information gain after 2 rounds:");
-    let guesser = MaxEntropyGuesser::new();
+    let feedback_storage = FeedbackStorage::load().unwrap();
+    let guesser = MaxEntropyGuesser::builder()
+        .precomputed_patterns(feedback_storage)
+        .wordlist_subset(2000)
+        .build();
 
     // guesser.use_wordlist_subset(1500);
 

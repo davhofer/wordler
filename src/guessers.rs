@@ -1,7 +1,9 @@
 use crate::{Feedback, FeedbackStorage, Guess, GuessResult, GuessType, Guesser, WORDS};
 use dashmap::DashMap;
+use fxhash::FxHasher;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
+use std::hash::{Hash, Hasher};
 use std::{f64, time::Instant};
 
 // TODO: we currently ONLY guess based on max entropy. however, we should also incorporate the
@@ -28,24 +30,18 @@ fn pattern_partitions(
     pattern_buckets
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct SolutionSetKey {
-    indices: Vec<usize>,
-}
+/// Custom hash function to compute map keys from &HashSet<&'static str>
+fn unordered_set_hash(set: &HashSet<&'static str>) -> u64 {
+    let mut accumulator = 0u64;
+    for entry in set {
+        let addr = entry.as_ptr() as u64;
+        let mut hasher = FxHasher::default();
+        addr.hash(&mut hasher);
+        let hash = hasher.finish();
 
-// TODO: change hash function/key to make more efficient
-impl SolutionSetKey {
-    fn from_set(
-        solutions: &HashSet<&'static str>,
-        word_to_idx: &HashMap<&'static str, usize>,
-    ) -> Self {
-        let mut indices: Vec<usize> = solutions
-            .iter()
-            .filter_map(|word| word_to_idx.get(word).copied())
-            .collect();
-        indices.sort_unstable();
-        Self { indices }
+        accumulator ^= hash;
     }
+    accumulator
 }
 
 pub struct MaxEntropyGuesserBuilder {
@@ -57,7 +53,12 @@ pub struct MaxEntropyGuesserBuilder {
 
 impl MaxEntropyGuesserBuilder {
     pub fn new() -> Self {
-        Self { wordlist_subset: None, feedback_storage: None, verbose: false, initial_guess: None }
+        Self {
+            wordlist_subset: None,
+            feedback_storage: None,
+            verbose: false,
+            initial_guess: None,
+        }
     }
 
     pub fn wordlist_subset(mut self, size: usize) -> Self {
@@ -92,12 +93,6 @@ impl MaxEntropyGuesserBuilder {
         };
         let possible_solutions: HashSet<&'static str> = wordlist.clone();
 
-        let word_to_idx = wordlist
-            .iter()
-            .enumerate()
-            .map(|(i, &word)| (word, i))
-            .collect();
-
         MaxEntropyGuesser {
             wordlist,
             possible_solutions,
@@ -105,7 +100,6 @@ impl MaxEntropyGuesserBuilder {
             verbose: self.verbose,
             guesses_made: 0,
             best_guess_cache: DashMap::new(),
-            word_to_idx,
             feedback_storage: self.feedback_storage,
         }
     }
@@ -117,8 +111,7 @@ pub struct MaxEntropyGuesser {
     initial_guess: Option<&'static str>,
     verbose: bool,
     guesses_made: u32,
-    best_guess_cache: DashMap<SolutionSetKey, Guess>,
-    word_to_idx: HashMap<&'static str, usize>,
+    best_guess_cache: DashMap<u64, Guess>,
     feedback_storage: Option<FeedbackStorage>,
 }
 
@@ -128,7 +121,7 @@ impl MaxEntropyGuesser {
     pub fn builder() -> MaxEntropyGuesserBuilder {
         MaxEntropyGuesserBuilder::new()
     }
-    
+
     pub fn new() -> Self {
         Self::builder().build()
     }
@@ -168,7 +161,7 @@ impl MaxEntropyGuesser {
             };
         }
 
-        let key = SolutionSetKey::from_set(possible_solutions, &self.word_to_idx);
+        let key = unordered_set_hash(possible_solutions);
         if size >= 10
             && let Some(cached) = self.best_guess_cache.get(&key)
         {
@@ -261,8 +254,7 @@ impl MaxEntropyGuesser {
             .unwrap();
 
         if size >= 10 {
-            self.best_guess_cache
-                .insert(key, result.clone());
+            self.best_guess_cache.insert(key, result.clone());
         }
         result
     }

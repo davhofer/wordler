@@ -6,8 +6,7 @@ use std::{
     collections::HashMap,
     io::{self, Read, Write, stdin, stdout},
 };
-use wincode::{self, containers, len::BincodeLen, SchemaRead, SchemaWrite};
-// use wincode::containers::Vec;
+use wincode::{self, SchemaRead, SchemaWrite, containers, len::BincodeLen};
 
 mod guessers;
 pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
@@ -15,7 +14,7 @@ pub use guessers::{MaxEntropyGuesser, MinExpectedScoreGuesser};
 /// Wordlist containing all possible guesses and solutions.
 const WORDS: &str = include_str!("../data/words.txt");
 
-pub fn find_word_in_wordlist(
+pub fn find_string_in_wordlist(
     word: String,
     wordlist: &HashSet<&'static str>,
 ) -> Option<&'static str> {
@@ -212,9 +211,7 @@ pub struct FeedbackStorage {
     word_to_idx: HashMap<&'static str, usize>,
 }
 
-
 impl FeedbackStorage {
-
     fn get_storage_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("data")
@@ -383,14 +380,12 @@ macro_rules! mask {
 #[cfg(test)]
 mod tests {
     mod play {
-        use crate::{Wordle, MaxEntropyGuesser};
+        use crate::{MaxEntropyGuesser, Wordle};
 
         #[test]
         fn guess_found1() {
             let wordle = Wordle::new();
-            let guesser = MaxEntropyGuesser::builder()
-                .initial_guess("tares")
-                .build();
+            let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
             let sol_found = if let Some(_) = wordle.play("tares", guesser) {
                 true
             } else {
@@ -402,9 +397,7 @@ mod tests {
         #[test]
         fn guess_found2() {
             let wordle = Wordle::new();
-            let guesser = MaxEntropyGuesser::builder()
-                .initial_guess("tares")
-                .build();
+            let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
             let sol_found = if let Some(_) = wordle.play("oomph", guesser) {
                 true
             } else {
@@ -416,9 +409,7 @@ mod tests {
         #[test]
         fn guess_found3() {
             let wordle = Wordle::new();
-            let guesser = MaxEntropyGuesser::builder()
-                .initial_guess("tares")
-                .build();
+            let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
             let sol_found = if let Some(_) = wordle.play("aargh", guesser) {
                 true
             } else {
@@ -430,9 +421,7 @@ mod tests {
         #[test]
         fn guess_found4() {
             let wordle = Wordle::new();
-            let guesser = MaxEntropyGuesser::builder()
-                .initial_guess("tares")
-                .build();
+            let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
             let sol_found = if let Some(_) = wordle.play("bobby", guesser) {
                 true
             } else {
@@ -444,9 +433,7 @@ mod tests {
         #[test]
         fn guess_found5() {
             let wordle = Wordle::new();
-            let guesser = MaxEntropyGuesser::builder()
-                .initial_guess("tares")
-                .build();
+            let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
             let sol_found = if let Some(_) = wordle.play("pulse", guesser) {
                 true
             } else {
@@ -454,7 +441,6 @@ mod tests {
             };
             assert!(sol_found);
         }
-
     }
     mod compute {
         use crate::Feedback;
@@ -505,15 +491,18 @@ mod tests {
         }
     }
     mod feedback_vec {
+        use crate::{Feedback, FeedbackVec};
         use std::path::PathBuf;
-        use crate::{FeedbackVec, Feedback};
 
         #[test]
         fn serialize_deserialize() {
-            let feedback_vec = FeedbackVec { entries: vec![[Feedback::Correct; 5]; 1024 * 1024 * 1024] };
+            let feedback_vec = FeedbackVec {
+                entries: vec![[Feedback::Correct; 5]; 1024 * 1024 * 1024],
+            };
             let path = PathBuf::from("tmp_feedback.storage");
             let res = feedback_vec.store(path);
-            if let Ok(_) = res {} else {
+            if let Ok(_) = res {
+            } else {
                 assert!(false);
             }
             drop(feedback_vec);
@@ -522,7 +511,10 @@ mod tests {
             if let Ok(feedback_vec) = FeedbackVec::load(path) {
                 assert_eq!(feedback_vec.entries[0], [Feedback::Correct; 5]);
                 assert_eq!(feedback_vec.entries[1024 * 1024], [Feedback::Correct; 5]);
-                assert_eq!(feedback_vec.entries[1024 * 1024 * 1024 - 1], [Feedback::Correct; 5]);
+                assert_eq!(
+                    feedback_vec.entries[1024 * 1024 * 1024 - 1],
+                    [Feedback::Correct; 5]
+                );
             } else {
                 assert!(false);
             }
