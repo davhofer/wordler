@@ -245,11 +245,14 @@ impl FeedbackStorage {
 
     /// Load the precomputed feedback storage from a file and initialize it
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_path(Self::get_storage_path())
+    }
+
+    pub fn load_from_path(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let words: Vec<&'static str> = WORDS.split_whitespace().collect();
         let word_to_idx: HashMap<&str, usize> =
             words.iter().enumerate().map(|(i, &w)| (w, i)).collect();
-        // TODO: load from file
-        let feedback_vec = FeedbackVec::load(Self::get_storage_path())?;
+        let feedback_vec = FeedbackVec::load(path)?;
 
         Ok(Self {
             wordlist_size: words.len(),
@@ -379,10 +382,14 @@ macro_rules! mask {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     mod play {
         use crate::{MaxEntropyGuesser, Wordle};
+        use super::serial;
 
         #[test]
+        #[serial]
         fn guess_found1() {
             let wordle = Wordle::new();
             let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
@@ -395,6 +402,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn guess_found2() {
             let wordle = Wordle::new();
             let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
@@ -407,6 +415,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn guess_found3() {
             let wordle = Wordle::new();
             let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
@@ -419,6 +428,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn guess_found4() {
             let wordle = Wordle::new();
             let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
@@ -431,6 +441,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn guess_found5() {
             let wordle = Wordle::new();
             let guesser = MaxEntropyGuesser::builder().initial_guess("tares").build();
@@ -492,31 +503,150 @@ mod tests {
     }
     mod feedback_vec {
         use crate::{Feedback, FeedbackVec};
-        use std::path::PathBuf;
+        use tempfile::NamedTempFile;
 
         #[test]
-        fn serialize_deserialize() {
+        fn serialize_deserialize_1k() {
+            let n = 1000;
             let feedback_vec = FeedbackVec {
-                entries: vec![[Feedback::Correct; 5]; 1024 * 1024 * 1024],
+                entries: vec![[Feedback::Correct; 5]; n * n],
             };
-            let path = PathBuf::from("tmp_feedback.storage");
-            let res = feedback_vec.store(path);
+
+            let temp_file = NamedTempFile::new().unwrap();
+            let path = temp_file.into_temp_path();
+
+            let res = feedback_vec.store(path.to_path_buf());
             if let Ok(_) = res {
             } else {
                 assert!(false);
             }
             drop(feedback_vec);
 
-            let path = PathBuf::from("tmp_feedback.storage");
-            if let Ok(feedback_vec) = FeedbackVec::load(path) {
+            if let Ok(feedback_vec) = FeedbackVec::load(path.to_path_buf()) {
                 assert_eq!(feedback_vec.entries[0], [Feedback::Correct; 5]);
-                assert_eq!(feedback_vec.entries[1024 * 1024], [Feedback::Correct; 5]);
                 assert_eq!(
-                    feedback_vec.entries[1024 * 1024 * 1024 - 1],
+                    feedback_vec.entries[(n / 2) * (n / 2)],
                     [Feedback::Correct; 5]
                 );
+                assert_eq!(feedback_vec.entries[n * n - 1], [Feedback::Correct; 5]);
             } else {
                 assert!(false);
+            }
+        }
+
+        #[test]
+        fn serialize_deserialize_5k() {
+            let n = 5000;
+            let feedback_vec = FeedbackVec {
+                entries: vec![[Feedback::Correct; 5]; n * n],
+            };
+            let temp_file = NamedTempFile::new().unwrap();
+            let path = temp_file.into_temp_path();
+
+            let res = feedback_vec.store(path.to_path_buf());
+            if let Ok(_) = res {
+            } else {
+                assert!(false);
+            }
+            drop(feedback_vec);
+
+            if let Ok(feedback_vec) = FeedbackVec::load(path.to_path_buf()) {
+                assert_eq!(feedback_vec.entries[0], [Feedback::Correct; 5]);
+                assert_eq!(
+                    feedback_vec.entries[(n / 2) * (n / 2)],
+                    [Feedback::Correct; 5]
+                );
+                assert_eq!(feedback_vec.entries[n * n - 1], [Feedback::Correct; 5]);
+            } else {
+                assert!(false);
+            }
+        }
+    }
+    mod storage {
+        use crate::{Feedback, FeedbackStorage, FeedbackVec};
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        #[test]
+        fn load_nonexistent_file_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            let non_existent_path = temp_dir.path().join("nonexistent.storage");
+
+            let result = FeedbackStorage::load_from_path(non_existent_path);
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn load_corrupted_file_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            let corrupted_path = temp_dir.path().join("corrupted.storage");
+
+            let mut file = File::create(&corrupted_path).unwrap();
+            file.write_all(b"this is not valid wincode data").unwrap();
+
+            let result = FeedbackStorage::load_from_path(corrupted_path);
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn load_partial_data_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            let partial_path = temp_dir.path().join("partial.storage");
+
+            let mut file = File::create(&partial_path).unwrap();
+            file.write_all(b"partial").unwrap();
+
+            let result = FeedbackStorage::load_from_path(partial_path);
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn feedback_vec_entries_accessible() {
+            let n = 100;
+            let entries = vec![[Feedback::Wrong; 5]; n * n];
+            let feedback_vec = FeedbackVec { entries };
+
+            assert_eq!(feedback_vec.entries.len(), n * n);
+            assert_eq!(feedback_vec.entries[0], [Feedback::Wrong; 5]);
+            assert_eq!(feedback_vec.entries[n * n - 1], [Feedback::Wrong; 5]);
+        }
+
+        #[test]
+        fn feedback_vec_serialize_deserialize_roundtrip() {
+            let n = 50;
+            let entries: Vec<[Feedback; 5]> = (0..n * n)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        [Feedback::Correct; 5]
+                    } else if i % 3 == 1 {
+                        [Feedback::Misplaced; 5]
+                    } else {
+                        [Feedback::Wrong; 5]
+                    }
+                })
+                .collect();
+            let feedback_vec = FeedbackVec { entries };
+
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().join("roundtrip.storage");
+            feedback_vec.store(path.clone()).unwrap();
+
+            let loaded = FeedbackVec::load(path).unwrap();
+
+            assert_eq!(loaded.entries.len(), n * n);
+            for (i, entry) in loaded.entries.iter().enumerate().take(100) {
+                let original = if i % 3 == 0 {
+                    [Feedback::Correct; 5]
+                } else if i % 3 == 1 {
+                    [Feedback::Misplaced; 5]
+                } else {
+                    [Feedback::Wrong; 5]
+                };
+                assert_eq!(*entry, original);
             }
         }
     }

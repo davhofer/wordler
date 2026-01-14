@@ -582,3 +582,339 @@ impl Guesser for MinExpectedScoreGuesser {
         self.compute_best_guess(self.possible_solutions())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use serial_test::serial;
+
+    mod guesser_logic {
+        use super::super::MaxEntropyGuesser;
+        use crate::{Feedback, GuessResult, Guesser};
+        use hashbrown::HashSet;
+        use super::serial;
+
+
+        #[test]
+        fn update_possible_solutions_filters_correctly() {
+            let mut guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let solution = "aargh";
+            let guess = "abaca";
+
+            let feedback = Feedback::compute(solution, guess);
+            let result = GuessResult { guess, feedback };
+
+            let before_count = guesser.possible_solutions().len();
+            guesser.update_state(result);
+            let after_count = guesser.possible_solutions().len();
+
+            assert!(after_count < before_count);
+            assert!(guesser.possible_solutions().contains(solution));
+        }
+
+        #[test]
+        fn update_possible_solutions_eliminates_wrong() {
+            let mut guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let solution = "pulse";
+            let guess = "tares";
+
+            let feedback = Feedback::compute(solution, guess);
+            let result = GuessResult { guess, feedback };
+
+            guesser.update_state(result);
+
+            for word in guesser.possible_solutions() {
+                let computed = Feedback::compute(word, guess);
+                assert_eq!(computed, feedback);
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_guess_returns_valid_word() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let possible_solutions: HashSet<&str> =
+                ["abcde", "fghij", "klmno"].iter().copied().collect();
+            let best_guess = guesser.compute_best_guess(&possible_solutions);
+
+            assert!(best_guess.get_string().len() == 5);
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_guess_single_solution() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let possible_solutions: HashSet<&str> = ["abcde"].iter().copied().collect();
+            let best_guess = guesser.compute_best_guess(&possible_solutions);
+
+            assert_eq!(best_guess.get_string(), "abcde");
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_guess_entropy_calculation() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let possible_solutions: HashSet<&str> = ["abcde", "fghij", "klmno", "pqrst"]
+                .iter()
+                .copied()
+                .collect();
+            let best_guess = guesser.compute_best_guess(&possible_solutions);
+
+            let (entropy, _) = best_guess.unwrap_entropy();
+            assert!(entropy >= 0.0);
+            assert!(entropy <= (possible_solutions.len() as f64).log2());
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_guess_cache_hit() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(50).build();
+
+            let possible_solutions: HashSet<&str> = [
+                "abcde", "fghij", "klmno", "pqrst", "abcde", "fghij", "klmno", "pqrst", "abcde",
+                "fghij",
+            ]
+            .iter()
+            .copied()
+            .collect();
+
+            let guess1 = guesser.compute_best_guess(&possible_solutions);
+
+            let possible_solutions2: HashSet<&str> = [
+                "abcde", "fghij", "klmno", "pqrst", "abcde", "fghij", "klmno", "pqrst", "abcde",
+                "fghij",
+            ]
+            .iter()
+            .copied()
+            .collect();
+            let guess2 = guesser.compute_best_guess(&possible_solutions2);
+
+            assert_eq!(guess1.get_string(), guess2.get_string());
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_initial_guess_returns_valid_word() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let (score, guess) = guesser.compute_best_initial_guess();
+
+            assert!(guess.get_string().len() == 5);
+            assert!(score >= 0.0);
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_initial_guess_is_in_wordlist() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let (_, guess) = guesser.compute_best_initial_guess();
+
+            assert!(guesser.wordlist().contains(guess.get_string()));
+        }
+
+        #[test]
+        #[serial]
+        fn compute_best_initial_guess_has_entropy() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let (_, guess) = guesser.compute_best_initial_guess();
+
+            let (entropy, _) = guess.unwrap_entropy();
+            assert!(entropy > 0.0);
+        }
+    }
+    mod pattern_partitions {
+        use hashbrown::HashSet;
+        use super::super::{pattern_partitions};
+        use crate::Feedback;
+
+        const TEST_WORDLIST: &[&str] = &["abcde", "fghij", "klmno", "pqrst", "abcde"];
+
+        #[test]
+        fn pattern_partitions_creates_buckets() {
+            let possible_solutions: HashSet<&str> = TEST_WORDLIST.iter().copied().collect();
+            let guess = "xxxxx";
+
+            let buckets = pattern_partitions(guess, &possible_solutions);
+
+            assert_eq!(buckets.len(), 1);
+            assert!(buckets.contains_key(&[Feedback::Wrong; 5]));
+        }
+
+        #[test]
+        fn pattern_partitions_correct_bucket() {
+            let possible_solutions: HashSet<&str> =
+                ["abcde", "abced", "edcba"].iter().copied().collect();
+            let guess = "abcde";
+
+            let buckets = pattern_partitions(guess, &possible_solutions);
+
+            let correct_bucket = buckets.get(&[Feedback::Correct; 5]).unwrap();
+            assert_eq!(correct_bucket.len(), 1);
+            assert!(correct_bucket.contains(&"abcde"));
+        }
+
+        #[test]
+        fn pattern_partitions_mixed_feedback() {
+            let possible_solutions: HashSet<&str> =
+                ["abcde", "fghij", "xyzab"].iter().copied().collect();
+            let guess = "cdefg";
+
+            let buckets = pattern_partitions(guess, &possible_solutions);
+
+            assert!(buckets.len() > 1);
+            for (pattern, words) in &buckets {
+                for word in words {
+                    let computed = Feedback::compute(word, guess);
+                    assert_eq!(*pattern, computed);
+                }
+            }
+        }
+    }
+    mod cache_and_hash {
+        use super::super::{MaxEntropyGuesser, unordered_set_hash};
+        use crate::Guesser;
+        use hashbrown::HashSet;
+        use super::serial;
+
+        // NOTE: hash function uses pointer addresses for &'static str! so we cannot hardcode words
+
+        #[test]
+        fn unordered_set_hash_same_set_same_hash() {
+            let s1 = "abc";
+            let s2 = "def";
+            let s3 = "ghi";
+            let set1: HashSet<&str> = [s1, s2, s3].iter().copied().collect();
+            let set2: HashSet<&str> = [s1, s2, s3].iter().copied().collect();
+
+            let hash1 = unordered_set_hash(&set1);
+            let hash2 = unordered_set_hash(&set2);
+
+            assert_eq!(hash1, hash2);
+        }
+
+        #[test]
+        fn unordered_set_hash_different_sets_different_hash() {
+            let s1 = "abc";
+            let s2 = "def";
+            let s3 = "ghi";
+            let s4 = "jkl";
+            let set1: HashSet<&str> = [s1, s2, s3].iter().copied().collect();
+            let set2: HashSet<&str> = [s1, s2, s4].iter().copied().collect();
+
+            let hash1 = unordered_set_hash(&set1);
+            let hash2 = unordered_set_hash(&set2);
+
+            assert_ne!(hash1, hash2);
+        }
+
+        #[test]
+        fn unordered_set_hash_empty_set() {
+            let set: HashSet<&str> = HashSet::new();
+            let hash = unordered_set_hash(&set);
+            assert_eq!(hash, 0);
+        }
+
+        #[test]
+        fn unordered_set_hash_single_element() {
+            let set: HashSet<&str> = ["abc"].iter().copied().collect();
+            let hash = unordered_set_hash(&set);
+            assert!(hash > 0);
+        }
+
+        #[test]
+        fn cache_key_reorder() {
+            let s1 = "apple";
+            let s2 = "apply";
+            let s3 = "apron";
+            let s4 = "ample";
+
+            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4]
+                .iter()
+                .copied()
+                .collect();
+            let key1 = unordered_set_hash(&possible_solutions);
+
+            let possible_solutions2: HashSet<&str> = [s3, s2, s4, s1]
+                .iter()
+                .copied()
+                .collect();
+            let key2 = unordered_set_hash(&possible_solutions2);
+
+            assert_eq!(key1, key2);
+        }
+
+        #[test]
+        fn cache_key_different() {
+            let s1 = "apple";
+            let s2 = "apply";
+            let s3 = "apron";
+            let s4 = "ample";
+
+            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4]
+                .iter()
+                .copied()
+                .collect();
+            let key1 = unordered_set_hash(&possible_solutions);
+
+            let possible_solutions2: HashSet<&str> = [s1, s2, s3]
+                .iter()
+                .copied()
+                .collect();
+            let key2 = unordered_set_hash(&possible_solutions2);
+
+            assert_ne!(key1, key2);
+        }
+
+        #[test]
+        #[serial]
+        fn cache_prevents_recomputation() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(30).build();
+
+            let possible_solutions: HashSet<&str> = guesser.wordlist().iter().take(20) 
+            .copied()
+            .collect();
+
+            let _guess1 = guesser.compute_best_guess(&possible_solutions);
+
+            let cache_len_before = guesser.best_guess_cache.len();
+
+            let possible_solutions2: HashSet<&str> = guesser.wordlist().iter().take(20) 
+            .copied()
+            .collect();
+
+            let _guess2 = guesser.compute_best_guess(&possible_solutions2);
+
+            assert!(guesser.best_guess_cache.len() == cache_len_before);
+        }
+
+        #[test]
+        #[serial]
+        fn cache_not_used_for_small_sets() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let possible_solutions: HashSet<&'static str> = [*guesser.wordlist().iter().next().unwrap()].iter().copied().collect();
+            let _guess1 = guesser.compute_best_guess(&possible_solutions);
+
+            assert_eq!(guesser.best_guess_cache.len(), 0);
+        }
+
+        #[test]
+        #[serial]
+        fn cache_is_used_for_large_sets() {
+            let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
+
+            let possible_solutions: HashSet<&str> = guesser.wordlist().iter().take(30) 
+            .copied()
+            .collect();
+            let _guess1 = guesser.compute_best_guess(&possible_solutions);
+
+            assert!(guesser.best_guess_cache.len() > 0);
+        }
+    }
+}
