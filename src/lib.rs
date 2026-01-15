@@ -212,12 +212,14 @@ pub struct FeedbackStorage {
 }
 
 impl FeedbackStorage {
+    /// Hardcoded path where FeedbackStorage is saved
     fn get_storage_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("data")
             .join("feedback_patterns.storage")
     }
 
+    /// Retrieve precomputed feedback pattern
     pub fn get(&self, solution: &'static str, guess: &'static str) -> Option<[Feedback; 5]> {
         let sol_idx = self.word_to_idx.get(solution)?;
         let guess_idx = self.word_to_idx.get(guess)?;
@@ -229,6 +231,7 @@ impl FeedbackStorage {
         Some(self.data.entries[idx])
     }
 
+    /// Compute and save feedback pattern for all (solution, guess) pairs
     pub fn build_and_save() -> Result<(), Box<dyn std::error::Error>> {
         let words: Vec<&'static str> = WORDS.split_whitespace().collect();
         let n = words.len();
@@ -243,12 +246,13 @@ impl FeedbackStorage {
         FeedbackVec { entries }.store(Self::get_storage_path())
     }
 
-    /// Load the precomputed feedback storage from a file and initialize it
+    /// Load the precomputed feedback storage and initialize it
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         Self::load_from_path(Self::get_storage_path())
     }
 
-    pub fn load_from_path(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    fn load_from_path(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        println!("Loading FeedbackStorage...");
         let words: Vec<&'static str> = WORDS.split_whitespace().collect();
         let word_to_idx: HashMap<&str, usize> =
             words.iter().enumerate().map(|(i, &w)| (w, i)).collect();
@@ -294,7 +298,7 @@ impl Feedback {
 }
 
 #[derive(Debug, Clone)]
-enum GuessType {
+pub enum GuessType {
     Entropy {
         entropy: f64,
         solution_probability: f64,
@@ -306,12 +310,12 @@ enum GuessType {
 
 #[derive(Debug, Clone)]
 pub struct Guess {
-    guess: &'static str,
-    variant: GuessType,
+    pub guess: &'static str,
+    pub variant: GuessType,
 }
 
 impl Guess {
-    // TODO: different ways of computing guess quality?
+    // TODO: different ways of computing guess quality from entropy & solution_probability?
     pub fn quality(&self) -> f64 {
         match self.variant {
             GuessType::Entropy {
@@ -321,6 +325,10 @@ impl Guess {
             GuessType::ExpectedScore { score } => score, // TODO: bad interface, for this variant
                                                          // lower quality is better...
         }
+    }
+
+    pub fn get_variant(&self) -> GuessType {
+        self.variant.clone()
     }
 
     pub fn get_string(&self) -> &'static str {
@@ -351,21 +359,19 @@ pub struct GuessResult {
 }
 
 pub trait Guesser {
-    /// Produce a new guess given the wordlist and prior guesses.
-    ///
-    /// (Note: the prior guesses are used to compute the list of possible solutions inside of
-    /// `guess()`.)
-
+    /// Produce a new guess based on the wordlist and set of currently possible solutions
     fn guess(&self) -> Guess;
 
     fn guesses_made(&self) -> u32;
 
+    /// Update internal state of guesser (e.g. possible_solutions, guesses_made) using the most
+    /// recent guess
     fn update_state(&mut self, guess_result: GuessResult);
 
-    // set of allowed guesses
+    // Set of allowed guesses
     fn wordlist(&self) -> &HashSet<&'static str>;
 
-    // set of currently possible solutions
+    // Set of currently possible solutions
     fn possible_solutions(&self) -> &HashSet<&'static str>;
 }
 
@@ -385,8 +391,8 @@ mod tests {
     use serial_test::serial;
 
     mod play {
-        use crate::{MaxEntropyGuesser, Wordle};
         use super::serial;
+        use crate::{MaxEntropyGuesser, Wordle};
 
         #[test]
         #[serial]
