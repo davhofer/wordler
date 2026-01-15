@@ -6,29 +6,8 @@ use rayon::prelude::*;
 use std::hash::{Hash, Hasher};
 use std::{f64, time::Instant};
 
-// TODO: we currently ONLY guess based on max entropy. however, we should also incorporate the
-// probability of a word being the correct solution. while it is uniform, it grows with fewer total
-// possible solution words
-// Question: how do we do the weighting?
-
-// TODO: introduce a very slight bias towards more common words, after all.
+// TODO: introduce a slight bias towards more common words?
 // for example: manic over amnic
-
-fn pattern_partitions(
-    guess: &'static str,
-    possible_solutions: &HashSet<&'static str>,
-) -> HashMap<[Feedback; 5], HashSet<&'static str>> {
-    let mut pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = HashMap::new();
-
-    // for each potential solution, compute corresponding feedback pattern
-    for solution in possible_solutions {
-        pattern_buckets
-            .entry(Feedback::compute(solution, guess))
-            .or_insert(HashSet::new())
-            .insert(solution);
-    }
-    pattern_buckets
-}
 
 /// Custom hash function to compute map keys from &HashSet<&'static str>
 fn unordered_set_hash(set: &HashSet<&'static str>) -> u64 {
@@ -43,6 +22,14 @@ fn unordered_set_hash(set: &HashSet<&'static str>) -> u64 {
     }
     accumulator
 }
+
+// TODO: For both guessers, once we know the initial guess only depends on the wordlist, so once we
+// know it, can store it and load it at runtime after computing it once
+// And for MinExpectedScoreGuesser could actually store and load the whole cache...
+// TODO: add a "compute_best_initial_guess" function for both which computes and stores this guess.
+// then in the normal guesser usage simply load this initial guess, unless explicitly stated
+// otherwise
+// Tell the user if expensive computation is happening...
 
 pub struct MaxEntropyGuesserBuilder {
     wordlist_subset: Option<usize>,
@@ -71,8 +58,8 @@ impl MaxEntropyGuesserBuilder {
         self
     }
 
-    pub fn verbose(mut self) -> Self {
-        self.verbose = true;
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
@@ -115,8 +102,6 @@ pub struct MaxEntropyGuesser {
     feedback_storage: Option<FeedbackStorage>,
 }
 
-// TODO: don't just compute the best initial guess, compute top n
-
 impl MaxEntropyGuesser {
     pub fn builder() -> MaxEntropyGuesserBuilder {
         MaxEntropyGuesserBuilder::new()
@@ -125,6 +110,7 @@ impl MaxEntropyGuesser {
     pub fn new() -> Self {
         Self::builder().build()
     }
+
     fn get_feedback(&self, solution: &'static str, guess: &'static str) -> [Feedback; 5] {
         if let Some(storage) = &self.feedback_storage {
             storage.get(solution, guess).unwrap()
@@ -148,6 +134,23 @@ impl MaxEntropyGuesser {
             .collect();
     }
 
+    fn pattern_partitions(
+        &self,
+        guess: &'static str,
+        possible_solutions: &HashSet<&'static str>,
+    ) -> HashMap<[Feedback; 5], HashSet<&'static str>> {
+        let mut pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = HashMap::new();
+
+        // for each potential solution, compute corresponding feedback pattern
+        for solution in possible_solutions {
+            pattern_buckets
+                .entry(self.get_feedback(solution, guess))
+                .or_insert(HashSet::new())
+                .insert(solution);
+        }
+        pattern_buckets
+    }
+
     pub fn compute_best_guess(&self, possible_solutions: &HashSet<&'static str>) -> Guess {
         let size = possible_solutions.len();
         // base case for performance
@@ -168,54 +171,7 @@ impl MaxEntropyGuesser {
             return (*cached).clone();
         }
 
-        // let map_func = |&guess_str| {
-        //     let mut pattern_counts: HashMap<[Feedback; 5], f64> = HashMap::new();
-        //
-        //     let num_solutions = possible_solutions.len() as f64;
-        //     let uniform_solution_proba = 1.0 / num_solutions;
-        //
-        //     for solution in possible_solutions {
-        //         *pattern_counts
-        //             .entry(Feedback::compute(solution, guess_str))
-        //             .or_insert(0.0) += 1.0;
-        //     }
-        //     let entropy = -pattern_counts
-        //         .iter()
-        //         .map(|(_, count)| {
-        //             let p = *count / num_solutions;
-        //             p * p.log2()
-        //         })
-        //         .sum::<f64>();
-        //
-        //     // println!("Entropy: {entropy}");
-        //     Guess {
-        //         guess: guess_str,
-        //         variant: GuessType::Entropy {
-        //             entropy,
-        //             solution_probability: if possible_solutions.contains(guess_str) {
-        //                 uniform_solution_proba
-        //             } else {
-        //                 0.0
-        //             },
-        //         },
-        //     }
-        // };
-        //
-        // // only use par_iter for large sets
-        // let result = if possible_solutions.len() > 100 {
-        //     self.wordlist()
-        //         .par_iter()
-        //         .map(map_func)
-        //         .min_by(|a, b| b.quality().total_cmp(&a.quality()))
-        //         .unwrap()
-        // } else {
-        //     self.wordlist()
-        //         .iter()
-        //         .map(map_func)
-        //         .min_by(|a, b| b.quality().total_cmp(&a.quality()))
-        //         .unwrap()
-        // };
-
+        // TODO: only use par_iter for large sets?
         let result = self
             .wordlist()
             .par_iter()
@@ -259,11 +215,13 @@ impl MaxEntropyGuesser {
         result
     }
 
-    pub fn compute_best_initial_guess(&self) -> (f64, Guess) {
+    /// Computes the guess with the largest expected information gain after 2 rounds if l2_entropy
+    /// is set and 1 round otherwise
+    pub fn compute_best_initial_guess(&self, l2_entropy: bool) -> (f64, Guess) {
+        if !l2_entropy {
+            return (0.0, self.compute_best_guess(self.wordlist()));
+        }
         let possible_solutions = self.wordlist();
-        // computes the guess with the largest expected information gain after 2 rounds
-
-        // NOTE: we only use max entropy here
 
         // go over all guesses to compute their level 1 entropy and subsequent expected l2 entropy
         self.wordlist()
@@ -273,12 +231,13 @@ impl MaxEntropyGuesser {
                 let uniform_solution_proba = 1.0 / num_solutions;
 
                 let pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> =
-                    pattern_partitions(guess_str, possible_solutions);
+                    self.pattern_partitions(guess_str, possible_solutions);
 
                 // level 2 entropy analysis
 
                 // TODO: does par_iter make sense here? or obsolete as compute_best_guess also will do
                 // par iter?
+                // => compare runtime
                 let (l1_entropy, expected_l2_entropy) = pattern_buckets
                     .par_iter()
                     .map(|(_, bucket)| {
@@ -304,7 +263,8 @@ impl MaxEntropyGuesser {
                         },
                     );
 
-                // TODO: could achieve the same using (a_l1_ent - b_l1_ent) above, right?
+                // Could achieve the same using (a_l1_ent - b_l1_ent) above, but this is
+                // conceptually simpler
                 let l1_entropy = -l1_entropy;
 
                 let score = l1_entropy + expected_l2_entropy;
@@ -398,34 +358,129 @@ impl Guesser for MaxEntropyGuesser {
     }
 }
 
+pub struct MinExpectedScoreGuesserBuilder {
+    wordlist_subset: Option<usize>,
+    feedback_storage: Option<FeedbackStorage>,
+    verbose: bool,
+    initial_guess: Option<&'static str>,
+    top_k: usize,
+}
+
+impl MinExpectedScoreGuesserBuilder {
+    pub fn new() -> Self {
+        Self {
+            wordlist_subset: None,
+            feedback_storage: None,
+            verbose: false,
+            initial_guess: None,
+            top_k: 20,
+        }
+    }
+
+    pub fn wordlist_subset(mut self, size: usize) -> Self {
+        self.wordlist_subset = Some(size);
+        self
+    }
+
+    pub fn precomputed_patterns(mut self, feedback_storage: FeedbackStorage) -> Self {
+        self.feedback_storage = Some(feedback_storage);
+        self
+    }
+
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    pub fn initial_guess(mut self, initial_guess: &'static str) -> Self {
+        self.initial_guess = Some(initial_guess);
+        self
+    }
+
+    pub fn initial_guess_option(mut self, initial_guess: Option<&'static str>) -> Self {
+        self.initial_guess = initial_guess;
+        self
+    }
+
+    pub fn top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+
+    pub fn build(self) -> MinExpectedScoreGuesser {
+        let wordlist: HashSet<&'static str> = match self.wordlist_subset {
+            Some(size) => WORDS.split_whitespace().take(size).collect(),
+            None => WORDS.split_whitespace().collect(),
+        };
+        let possible_solutions: HashSet<&'static str> = wordlist.clone();
+
+        MinExpectedScoreGuesser {
+            wordlist,
+            possible_solutions,
+            initial_guess: self.initial_guess,
+            verbose: self.verbose,
+            guesses_made: 0,
+            best_guess_cache: DashMap::new(),
+            feedback_storage: self.feedback_storage,
+            used_guesses: HashSet::new(), 
+            top_k: self.top_k, 
+        } 
+    }
+}
+
 pub struct MinExpectedScoreGuesser {
     wordlist: HashSet<&'static str>,
     possible_solutions: HashSet<&'static str>,
     initial_guess: Option<&'static str>,
     verbose: bool,
     guesses_made: u32,
+    /// Cache of the best guesses for a specific set of possible solutions. Key is derived from
+    /// &HashSet<&'static str> using fn unordered_set_hash() and value is a sorted vector of best
+    /// guesses (multiple for the case where a guess was already used earlier)
+    best_guess_cache: DashMap<u64, Vec<Guess>>,
+    /// Already guessed words
+    used_guesses: HashSet<&'static str>,
+    /// top k guesses (by entropy) to consider
+    top_k: usize,
+    /// Precomputed feedback patterns for all (solution, guess) pairs
+    feedback_storage: Option<FeedbackStorage>,
 }
 
 impl MinExpectedScoreGuesser {
+    pub fn builder() -> MinExpectedScoreGuesserBuilder {
+        MinExpectedScoreGuesserBuilder::new()
+    }
+
     pub fn new() -> Self {
-        let wordlist: HashSet<&str> = WORDS.split_whitespace().collect();
-        let possible_solutions: HashSet<&str> = WORDS.split_whitespace().collect();
-        Self {
-            wordlist,
-            possible_solutions,
-            initial_guess: None,
-            verbose: false,
-            guesses_made: 0,
-        }
+        Self::builder().build()
     }
+    // pub fn new() -> Self {
+    //     let wordlist: HashSet<&str> = WORDS.split_whitespace().take(2000).collect();
+    //     let possible_solutions: HashSet<&str> = WORDS.split_whitespace().take(2000).collect();
+    //     Self {
+    //         wordlist,
+    //         possible_solutions,
+    //         initial_guess: None,
+    //         verbose: false,
+    //         guesses_made: 0,
+    //         best_guess_cache: DashMap::new(),
+    //         used_guesses: HashSet::new(),
+    //         top_k: 200,
+    //         feedback_storage: None,
+    //     }
+    // }
 
-    pub fn set_verbose(&mut self) {
-        self.verbose = true;
-    }
-
-    pub fn set_initial_guess(&mut self, guess: &'static str) {
-        self.initial_guess = Some(guess);
-    }
+    // pub fn set_verbose(&mut self) {
+    //     self.verbose = true;
+    // }
+    //
+    // pub fn set_initial_guess(&mut self, guess: &'static str) {
+    //     self.initial_guess = Some(guess);
+    // }
+    //
+    // pub fn set_feedback_storage(&mut self, feedback_storage: FeedbackStorage) {
+    //     self.feedback_storage = Some(feedback_storage);
+    // }
 
     fn update_possible_solutions(&mut self, result: &GuessResult) {
         self.possible_solutions = self
@@ -442,56 +497,268 @@ impl MinExpectedScoreGuesser {
             .collect();
     }
 
-    // TODO: memoize expected score
-    pub fn compute_best_guess(&self, possible_solutions: &HashSet<&'static str>) -> Guess {
-        self.wordlist()
-            .par_iter()
-            .map(|possible_guess| {
-                let guess_variant = GuessType::ExpectedScore {
-                    score: self.expected_score(possible_guess, possible_solutions),
-                };
-                Guess {
-                    guess: possible_guess,
-                    variant: guess_variant,
-                }
-            })
-            .min_by(|a, b| {
-                b.unwrap_expected_score()
-                    .total_cmp(&a.unwrap_expected_score())
-            })
-            .unwrap()
-    }
-
-    // TODO: recursion, does this work? memory consumption? make more efficient?
-    // bottom up instead of top down?
-    pub fn expected_score(
+    fn pattern_partitions_sorted(
         &self,
         guess: &'static str,
         possible_solutions: &HashSet<&'static str>,
-    ) -> f64 {
-        println!(
-            "computing E[score] of guess '{guess}' with len possible solutions {}",
-            possible_solutions.len()
-        );
+    ) -> Vec<([Feedback; 5], HashSet<&'static str>)> {
+        // HashMap<[Feedback; 5], HashSet<&'static str>> {
+        let mut pattern_buckets: HashMap<[Feedback; 5], HashSet<&'static str>> = HashMap::new();
 
-        // compute pattern buckets with corresponding possible solutions
-        // O(len(possible_solutions))
-        let buckets = pattern_partitions(guess, possible_solutions);
+        // for each potential solution, compute corresponding feedback pattern
+        for solution in possible_solutions {
+            pattern_buckets
+                .entry(self.get_feedback(solution, guess))
+                .or_insert(HashSet::new())
+                .insert(solution);
+        }
 
-        // compute score and size for each bucket
-        // score is the min expected score across all possible guesses
-        let bucket_score_size = buckets.par_iter().map(|(_, solution_set)| {
-            (
-                self.compute_best_guess(solution_set)
-                    .unwrap_expected_score(),
-                solution_set.len(),
-            )
-        });
+        // pattern_buckets
+        let mut buckets_vec: Vec<_> = pattern_buckets.into_iter().collect();
+        buckets_vec.sort_by(|a, b| b.1.len().cmp(&a.1.len())); // largest first
+        buckets_vec
+    }
 
-        // compute weighted avg of scores of all buckets
-        bucket_score_size
-            .map(|(score, size)| score * (size as f64) / (possible_solutions.len() as f64))
-            .sum()
+    fn get_feedback(&self, solution: &'static str, guess: &'static str) -> [Feedback; 5] {
+        if let Some(storage) = &self.feedback_storage {
+            storage.get(solution, guess).unwrap()
+        } else {
+            Feedback::compute(solution, guess)
+        }
+    }
+
+    // TODO: double check if the expected score calculations are correct, with the +1 or not...
+
+    pub fn compute_best_guess(
+        &self,
+        used_guesses: &HashSet<&'static str>,
+        possible_solutions: &HashSet<&'static str>,
+        is_first: bool,
+    ) -> Guess {
+        if is_first && self.verbose {
+            println!("\ncompute_best_guess\nused_guesses: {used_guesses:?}");
+            if possible_solutions.len() < 10 {
+                println!(
+                    "possible_solutions ({}): {possible_solutions:?}",
+                    possible_solutions.len()
+                );
+            } else {
+                println!("possible_solutions ({}): ...", possible_solutions.len());
+            }
+        }
+
+        if used_guesses.len() >= 8 {
+            // TODO: log2 is too conservative?
+            // use a lower bound?
+            let proxy_score = (possible_solutions.len() as f64).log2();
+            return Guess {
+                guess: "aaaaa", // dummy word, won't actually be used
+                variant: GuessType::ExpectedScore { score: proxy_score },
+            };
+        }
+
+        // TODO: how else can we distinguish and prune/eliminate the branches we don't want anyway?
+
+        if possible_solutions.is_empty() {
+            return Guess {
+                guess: "aaaaa", // dummy word, won't actually be used
+                variant: GuessType::ExpectedScore {
+                    score: f64::INFINITY,
+                },
+            };
+        }
+        if possible_solutions.len() == 1 {
+            // println!("BASE CASE AFTER: {}", used_guesses.len());
+            let guess = *possible_solutions.iter().next().unwrap();
+            let variant = GuessType::ExpectedScore { score: 1.0 };
+            let ans = Guess { guess, variant };
+            return ans;
+        }
+        if possible_solutions.len() == 2 {
+            // println!("BASE CASE AFTER: {}", used_guesses.len());
+            let guess = *possible_solutions.iter().next().unwrap();
+            let variant = GuessType::ExpectedScore { score: 1.5 };
+            let ans = Guess { guess, variant };
+            return ans;
+        }
+
+        let key = unordered_set_hash(possible_solutions);
+
+        if let Some(val) = self.best_guess_cache.get(&key) {
+            // TODO: is this correct? or only approximately? could be improved?
+            // vector length goes up to 6+
+            // use a sorted data structure?
+            for guess in (*val).clone() {
+                if !used_guesses.contains(guess.guess) {
+                    if is_first {
+                        println!("Cache hit!");
+                    }
+                    return guess.clone();
+                }
+            }
+        }
+
+        let mut pruned = 0;
+
+        let mut best_score = f64::MAX;
+        let mut best_guess = "";
+
+        for guess in self.top_k_entropy_guesses(possible_solutions) {
+            let possible_guess = guess.guess;
+            if used_guesses.contains(possible_guess) {
+                // return None;
+                continue;
+            }
+
+            // Compute expected score of possible_guess
+
+            // compute pattern buckets with corresponding possible solutions
+            // O(len(possible_solutions))
+            let buckets = self.pattern_partitions_sorted(possible_guess, possible_solutions);
+
+            // TODO: in whcih order to process buckets for better efficiency/pruning?
+
+            // these are the feedback patterns we could see after making this guess, and the
+            // follow up possible solution sets
+            //
+            // we will need to compute the expected score aggregating the best guesses for each
+            // bucket. this is where the recursion takes place
+
+            let mut next_used_guesses = used_guesses.clone();
+            next_used_guesses.insert(possible_guess);
+            // compute score and size for each bucket
+            // score is the min expected score across all possible guesses
+            //
+            // TODO: instead of actually computing the best guess and its score here, can we
+            // use a proxy metric?
+
+            // expected score of the guess currently under consideration
+            let mut cur_expected_score = 0.0;
+            for (pattern, solution_set) in &buckets {
+                let branch_probability =
+                    (solution_set.len() as f64) / (possible_solutions.len() as f64);
+                if *pattern == [Feedback::Correct; 5] {
+                    // our guess was correct; we are done
+                    cur_expected_score += 1.0 * branch_probability;
+                    continue;
+                }
+
+                // TODO: is this a good heuristic?
+                let perfect_split_score =
+                    (1.0 + (solution_set.len() as f64).log(243.0)) * branch_probability;
+
+                if cur_expected_score + perfect_split_score >= best_score {
+                    cur_expected_score += perfect_split_score;
+                    pruned += 1;
+                    break;
+                }
+
+                let recursive_score = self
+                    .compute_best_guess(&next_used_guesses, solution_set, false)
+                    .unwrap_expected_score();
+                cur_expected_score += (1.0 + recursive_score) * branch_probability;
+
+                if cur_expected_score >= best_score {
+                    break;
+                }
+            }
+            if cur_expected_score >= best_score {
+                pruned += 1;
+                continue;
+            }
+
+            best_score = cur_expected_score;
+            best_guess = possible_guess;
+        }
+        let ans = Guess {
+            guess: best_guess,
+            variant: GuessType::ExpectedScore { score: best_score },
+        };
+
+        // Try to get mutable reference
+        if let Some(mut guesses) = self.best_guess_cache.get_mut(&key) {
+            guesses.push(ans.clone());
+            // smallest first
+            guesses.sort_by(|a, b| a.quality().total_cmp(&b.quality()));
+            // println!(" sorted best guesses cache: {:?}", guesses);
+        } else {
+            // Key doesn't exist, insert new vec
+            self.best_guess_cache.insert(key, vec![ans.clone()]);
+        }
+        // self.best_guess_cache.insert(key, ans.clone());
+        if is_first {
+            println!("pruned: {pruned}");
+        }
+
+        return ans;
+    }
+
+    fn top_k_entropy_guesses(&self, possible_solutions: &HashSet<&'static str>) -> Vec<Guess> {
+        let size = possible_solutions.len();
+        // base case for performance
+        if size == 1 {
+            return vec![Guess {
+                guess: possible_solutions.iter().next().unwrap(),
+                variant: GuessType::Entropy {
+                    entropy: 0.0,
+                    solution_probability: 1.0,
+                },
+            }];
+        }
+
+        // let key = unordered_set_hash(possible_solutions);
+        // if size >= 10
+        //     && let Some(cached) = self.best_guess_cache.get(&key)
+        // {
+        //     return (*cached).clone();
+        // }
+        //
+
+        let mut all_guesses: Vec<_> = self
+            .wordlist()
+            .par_iter()
+            .map(|guess_str| {
+                let mut pattern_counts: HashMap<[Feedback; 5], usize> = HashMap::new();
+
+                let num_solutions = possible_solutions.len() as f64;
+                let uniform_solution_proba = 1.0 / num_solutions;
+
+                for solution in possible_solutions {
+                    *pattern_counts
+                        .entry(self.get_feedback(solution, guess_str)) // TODO: replace cached?
+                        .or_insert(0) += 1;
+                }
+                let entropy = -pattern_counts
+                    .iter()
+                    .map(|(_, count)| {
+                        let p = (*count as f64) / num_solutions;
+                        p * p.log2()
+                    })
+                    .sum::<f64>();
+
+                Guess {
+                    guess: guess_str,
+                    variant: GuessType::Entropy {
+                        entropy,
+                        solution_probability: if possible_solutions.contains(guess_str) {
+                            uniform_solution_proba
+                        } else {
+                            0.0
+                        },
+                    },
+                }
+            })
+            .collect();
+        // biggest first
+        all_guesses.sort_by(|a, b| b.quality().total_cmp(&a.quality()));
+
+        // Take top k
+        all_guesses.truncate(self.top_k);
+        all_guesses
+    }
+
+    pub fn compute_best_initial_guess(&self) -> Guess {
+        self.compute_best_guess(&HashSet::new(), self.wordlist(), true)
     }
 }
 
@@ -561,9 +828,12 @@ impl Guesser for MinExpectedScoreGuesser {
         self.guesses_made += 1;
 
         self.update_possible_solutions(&guess_result);
+        self.used_guesses.insert(guess_result.guess);
 
         if self.verbose {
-            println!("Result pattern: {:?}", guess_result.feedback);
+            // TODO:
+            // println!("Result pattern: {:?}", guess_result.feedback);
+            // println!("new possible_solutions: {:?}", self.possible_solutions);
         }
     }
 
@@ -579,7 +849,11 @@ impl Guesser for MinExpectedScoreGuesser {
                 variant: GuessType::ExpectedScore { score: 0.0 },
             };
         }
-        self.compute_best_guess(self.possible_solutions())
+        let guess = self.compute_best_guess(&self.used_guesses, self.possible_solutions(), true);
+        if self.verbose {
+            println!("\n > {guess:?}");
+        }
+        guess
     }
 }
 
@@ -589,10 +863,9 @@ mod test {
 
     mod guesser_logic {
         use super::super::MaxEntropyGuesser;
+        use super::serial;
         use crate::{Feedback, GuessResult, Guesser};
         use hashbrown::HashSet;
-        use super::serial;
-
 
         #[test]
         fn update_possible_solutions_filters_correctly() {
@@ -701,7 +974,7 @@ mod test {
         fn compute_best_initial_guess_returns_valid_word() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
 
-            let (score, guess) = guesser.compute_best_initial_guess();
+            let (score, guess) = guesser.compute_best_initial_guess(true);
 
             assert!(guess.get_string().len() == 5);
             assert!(score >= 0.0);
@@ -712,7 +985,7 @@ mod test {
         fn compute_best_initial_guess_is_in_wordlist() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
 
-            let (_, guess) = guesser.compute_best_initial_guess();
+            let (_, guess) = guesser.compute_best_initial_guess(true);
 
             assert!(guesser.wordlist().contains(guess.get_string()));
         }
@@ -722,25 +995,26 @@ mod test {
         fn compute_best_initial_guess_has_entropy() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
 
-            let (_, guess) = guesser.compute_best_initial_guess();
+            let (_, guess) = guesser.compute_best_initial_guess(true);
 
             let (entropy, _) = guess.unwrap_entropy();
             assert!(entropy > 0.0);
         }
     }
     mod pattern_partitions {
-        use hashbrown::HashSet;
-        use super::super::{pattern_partitions};
+        use super::super::MaxEntropyGuesser;
         use crate::Feedback;
+        use hashbrown::HashSet;
 
         const TEST_WORDLIST: &[&str] = &["abcde", "fghij", "klmno", "pqrst", "abcde"];
 
         #[test]
         fn pattern_partitions_creates_buckets() {
+            let guesser = MaxEntropyGuesser::new();
             let possible_solutions: HashSet<&str> = TEST_WORDLIST.iter().copied().collect();
             let guess = "xxxxx";
 
-            let buckets = pattern_partitions(guess, &possible_solutions);
+            let buckets = guesser.pattern_partitions(guess, &possible_solutions);
 
             assert_eq!(buckets.len(), 1);
             assert!(buckets.contains_key(&[Feedback::Wrong; 5]));
@@ -748,11 +1022,12 @@ mod test {
 
         #[test]
         fn pattern_partitions_correct_bucket() {
+            let guesser = MaxEntropyGuesser::new();
             let possible_solutions: HashSet<&str> =
                 ["abcde", "abced", "edcba"].iter().copied().collect();
             let guess = "abcde";
 
-            let buckets = pattern_partitions(guess, &possible_solutions);
+            let buckets = guesser.pattern_partitions(guess, &possible_solutions);
 
             let correct_bucket = buckets.get(&[Feedback::Correct; 5]).unwrap();
             assert_eq!(correct_bucket.len(), 1);
@@ -761,11 +1036,12 @@ mod test {
 
         #[test]
         fn pattern_partitions_mixed_feedback() {
+            let guesser = MaxEntropyGuesser::new();
             let possible_solutions: HashSet<&str> =
                 ["abcde", "fghij", "xyzab"].iter().copied().collect();
             let guess = "cdefg";
 
-            let buckets = pattern_partitions(guess, &possible_solutions);
+            let buckets = guesser.pattern_partitions(guess, &possible_solutions);
 
             assert!(buckets.len() > 1);
             for (pattern, words) in &buckets {
@@ -778,9 +1054,9 @@ mod test {
     }
     mod cache_and_hash {
         use super::super::{MaxEntropyGuesser, unordered_set_hash};
+        use super::serial;
         use crate::Guesser;
         use hashbrown::HashSet;
-        use super::serial;
 
         // NOTE: hash function uses pointer addresses for &'static str! so we cannot hardcode words
 
@@ -834,16 +1110,10 @@ mod test {
             let s3 = "apron";
             let s4 = "ample";
 
-            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4]
-                .iter()
-                .copied()
-                .collect();
+            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4].iter().copied().collect();
             let key1 = unordered_set_hash(&possible_solutions);
 
-            let possible_solutions2: HashSet<&str> = [s3, s2, s4, s1]
-                .iter()
-                .copied()
-                .collect();
+            let possible_solutions2: HashSet<&str> = [s3, s2, s4, s1].iter().copied().collect();
             let key2 = unordered_set_hash(&possible_solutions2);
 
             assert_eq!(key1, key2);
@@ -856,16 +1126,10 @@ mod test {
             let s3 = "apron";
             let s4 = "ample";
 
-            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4]
-                .iter()
-                .copied()
-                .collect();
+            let possible_solutions: HashSet<&str> = [s1, s2, s3, s4].iter().copied().collect();
             let key1 = unordered_set_hash(&possible_solutions);
 
-            let possible_solutions2: HashSet<&str> = [s1, s2, s3]
-                .iter()
-                .copied()
-                .collect();
+            let possible_solutions2: HashSet<&str> = [s1, s2, s3].iter().copied().collect();
             let key2 = unordered_set_hash(&possible_solutions2);
 
             assert_ne!(key1, key2);
@@ -876,17 +1140,15 @@ mod test {
         fn cache_prevents_recomputation() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(30).build();
 
-            let possible_solutions: HashSet<&str> = guesser.wordlist().iter().take(20) 
-            .copied()
-            .collect();
+            let possible_solutions: HashSet<&str> =
+                guesser.wordlist().iter().take(20).copied().collect();
 
             let _guess1 = guesser.compute_best_guess(&possible_solutions);
 
             let cache_len_before = guesser.best_guess_cache.len();
 
-            let possible_solutions2: HashSet<&str> = guesser.wordlist().iter().take(20) 
-            .copied()
-            .collect();
+            let possible_solutions2: HashSet<&str> =
+                guesser.wordlist().iter().take(20).copied().collect();
 
             let _guess2 = guesser.compute_best_guess(&possible_solutions2);
 
@@ -898,7 +1160,11 @@ mod test {
         fn cache_not_used_for_small_sets() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
 
-            let possible_solutions: HashSet<&'static str> = [*guesser.wordlist().iter().next().unwrap()].iter().copied().collect();
+            let possible_solutions: HashSet<&'static str> =
+                [*guesser.wordlist().iter().next().unwrap()]
+                    .iter()
+                    .copied()
+                    .collect();
             let _guess1 = guesser.compute_best_guess(&possible_solutions);
 
             assert_eq!(guesser.best_guess_cache.len(), 0);
@@ -909,9 +1175,8 @@ mod test {
         fn cache_is_used_for_large_sets() {
             let guesser = MaxEntropyGuesser::builder().wordlist_subset(100).build();
 
-            let possible_solutions: HashSet<&str> = guesser.wordlist().iter().take(30) 
-            .copied()
-            .collect();
+            let possible_solutions: HashSet<&str> =
+                guesser.wordlist().iter().take(30).copied().collect();
             let _guess1 = guesser.compute_best_guess(&possible_solutions);
 
             assert!(guesser.best_guess_cache.len() > 0);
