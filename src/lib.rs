@@ -54,9 +54,9 @@ impl Wordle {
             "I will propose the words to guess, and you respond with the resulting color pattern. Please write the pattern as 5 single characters separated by spaces. Use C (correct) for green, M (misplaced) for yellow, and W (wrong) for grey.\nFor example, the pattern [Green, Grey, Yellow, Grey, Grey] should be denoted as 'C W M W W'."
         );
 
-        for i in 1..=6 {
+        for i in 1..=16 {
             let guess = guesser.guess().get_string();
-            println!("Guess #{i}: {}", guess);
+            println!("\nGuess #{i}: {}", guess);
 
             let pattern = get_userinput();
             let feedback_vec: Vec<_> = pattern
@@ -78,6 +78,12 @@ impl Wordle {
                 feedback[i] = feedback_vec[i];
             }
             guesser.update_state(GuessResult { guess, feedback });
+
+            if guesser.possible_solutions().len() == 1 {
+                let ans = *guesser.possible_solutions().iter().next().unwrap();
+                println!("\nSolution must be: {ans}");
+                return;
+            }
         }
     }
 
